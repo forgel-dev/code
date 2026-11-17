@@ -128,9 +128,21 @@ def split_global_flags(argv: Sequence[str]) -> Tuple[List[str], bool, Optional[s
     return rest, as_json, engine
 
 
-def engine_arguments(args: argparse.Namespace, project: str) -> List[str]:
-    """Translate parsed client arguments into the engine's own argv."""
+def engine_arguments(args: argparse.Namespace, project: Optional[str]) -> List[str]:
+    """Translate parsed client arguments into the engine's own argv.
+
+    ``project`` is a project key the engine already accepted through
+    ``forgel-code use``; while the user has not picked one it stays ``None`` so
+    the engine keeps its own active project and never sees the client's local
+    session label.
+    """
     command = args.command
+
+    def with_project(argv: List[str]) -> List[str]:
+        if project:
+            return argv + ["--project", project]
+        return argv
+
     if command == "say":
         return ["say", " ".join(args.phrase)]
     if command == "task":
@@ -138,13 +150,19 @@ def engine_arguments(args: argparse.Namespace, project: str) -> List[str]:
         # requested one out of that machine-readable answer.
         return ["tasks"]
     if command == "accept":
-        return ["task", "accept", "--project", project, "--task", args.task_id]
+        return with_project(["task", "accept"]) + ["--task", args.task_id]
     if command == "rework":
-        argv = ["task", "reject", "--project", project, "--task", args.task_id]
+        # The engine's ``task`` parser carries the remarks of a rejection in
+        # ``--notes``; it has no ``--reason`` option.
         remarks = " ".join(args.remarks).strip()
-        if remarks:
-            argv.extend(["--reason", remarks])
-        return argv
+        if not remarks:
+            raise ValueError("rework needs remarks")
+        return with_project(["task", "reject"]) + [
+            "--task",
+            args.task_id,
+            "--notes",
+            remarks,
+        ]
     if command == "plan":
         if not args.milestone:
             return ["plan"]
@@ -204,22 +222,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(rest)
 
     session = Session()
+    # The session key names the active project on the client side.
     project = session.project()
+    # Only a key the engine accepted is handed back to the engine.
+    engine_project = project if session.selected() else None
     command = args.command
+
+    try:
+        arguments = engine_arguments(args, engine_project)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     engine = Engine(engine_path or os.environ.get("FORGEL_ENGINE") or "forgel")
     try:
-        result = engine.run(engine_arguments(args, project))
+        result = engine.run(arguments)
         if command == "task":
             result = select_task(result, args.task_id)
+        if command == "use":
+            session.save_project(args.key)
+            project = args.key
     except EngineError as exc:
         return _report_failure(
             command, project, exc.message, as_json, exc.returncode or 1
         )
-
-    if command == "use":
-        session.save_project(args.key)
-        project = args.key
 
     if as_json:
         payload = {

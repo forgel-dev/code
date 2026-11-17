@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -16,6 +17,10 @@ SRC = ROOT / "forgel_code"
 
 sys.path.insert(0, str(ROOT))
 
+# The stub mirrors the shape of the real engine's ``task`` and ``use``
+# subparsers: it only knows the flags the engine really has, so a client that
+# invents ``--reason`` (or any other unknown option) fails here like it fails
+# against the engine.
 STUB_ENGINE = textwrap.dedent(
     """\
     import json
@@ -30,6 +35,32 @@ STUB_ENGINE = textwrap.dedent(
     if mode == "error":
         sys.stderr.write("engine refused: task is already closed\\n")
         sys.exit(3)
+
+    # Argument contract of the engine commands the client is allowed to call.
+    common_flags = {"--json", "--project"}
+    task_flags = common_flags | {
+        "--task",
+        "--actor",
+        "--notes",
+        "--title",
+        "--require",
+        "--accept",
+        "--constraint",
+        "--repo",
+        "--test-command",
+    }
+    if argv[:1] == ["task"]:
+        action = argv[1] if len(argv) > 1 else ""
+        if action not in {"accept", "reject"}:
+            sys.stderr.write("engine: unknown task action %r\\n" % action)
+            sys.exit(2)
+        for token in argv[2:]:
+            if token.startswith("--") and token not in task_flags:
+                sys.stderr.write("engine: unrecognized argument %s\\n" % token)
+                sys.exit(2)
+    if argv[:1] == ["use"] and len(argv) < 2:
+        sys.stderr.write("engine: use needs a project key\\n")
+        sys.exit(2)
 
     payload = json.loads(os.environ["FORGEL_STUB_PAYLOAD"])
     sys.stdout.write(json.dumps(payload) + "\\n")
@@ -132,24 +163,23 @@ class HelpTest(unittest.TestCase):
 
 
 class CommandTest(ClientTestCase):
-    # Every command from the Pareto scope with the engine argv it must produce.
-    # The engine's own ``--json`` flag is appended by the client.
+    # Every command from the Pareto scope with the engine argv it must produce
+    # while no project has been selected yet. The engine's own ``--json`` flag
+    # is appended by the client.
     CASES = [
         (("say", "add", "a", "login", "screen"), ["say", "add a login screen"]),
         (("status",), ["status"]),
         (("tasks",), ["tasks"]),
         (("task", "t-1"), ["tasks"]),
-        (("accept", "t-1"), ["task", "accept", "--project", "local", "--task", "t-1"]),
+        (("accept", "t-1"), ["task", "accept", "--task", "t-1"]),
         (
             ("rework", "t-1", "the", "button", "is", "dead"),
             [
                 "task",
                 "reject",
-                "--project",
-                "local",
                 "--task",
                 "t-1",
-                "--reason",
+                "--notes",
                 "the button is dead",
             ],
         ),
@@ -228,7 +258,7 @@ class AcceptReworkTest(ClientTestCase):
         self.assertEqual(stderr, "")
         self.assertEqual(
             self.last_engine_argv(),
-            ["task", "accept", "--project", "local", "--task", "t-1", "--json"],
+            ["task", "accept", "--task", "t-1", "--json"],
         )
 
     def test_rework_reaches_the_engine_and_carries_remarks(self) -> None:
@@ -240,20 +270,55 @@ class AcceptReworkTest(ClientTestCase):
             [
                 "task",
                 "reject",
-                "--project",
-                "local",
                 "--task",
                 "t-1",
-                "--reason",
+                "--notes",
                 "no tests",
                 "--json",
             ],
         )
 
-    def test_accept_uses_the_active_project(self) -> None:
+    def test_default_session_key_never_reaches_the_engine(self) -> None:
+        for args in (("accept", "t-1"), ("rework", "t-1", "no tests")):
+            with self.subTest(command=args[0]):
+                code, _, _ = self.run_client(*args)
+                self.assertEqual(code, 0)
+                argv = self.last_engine_argv()
+                self.assertNotIn("--project", argv)
+                self.assertNotIn("local", argv)
+
+    def test_selected_project_is_passed_to_the_engine(self) -> None:
         self.assertEqual(self.run_client("use", "acme")[0], 0)
         self.assertEqual(self.run_client("accept", "t-1")[0], 0)
-        self.assertIn("acme", self.last_engine_argv())
+        self.assertEqual(
+            self.last_engine_argv(),
+            ["task", "accept", "--project", "acme", "--task", "t-1", "--json"],
+        )
+        self.assertEqual(self.run_client("rework", "t-1", "no tests")[0], 0)
+        self.assertEqual(
+            self.last_engine_argv(),
+            [
+                "task",
+                "reject",
+                "--project",
+                "acme",
+                "--task",
+                "t-1",
+                "--notes",
+                "no tests",
+                "--json",
+            ],
+        )
+
+    def test_rejected_use_does_not_change_the_session(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "error"
+        code, _, _ = self.run_client("use", "acme")
+        self.assertNotEqual(code, 0)
+
+        from forgel_code.session import Session
+
+        session = Session(Path(self.env["FORGEL_CODE_HOME"]) / "session.json")
+        self.assertFalse(session.selected())
 
     def test_rework_requires_remarks(self) -> None:
         with self.assertRaises(SystemExit):
@@ -293,6 +358,25 @@ class FailureTest(ClientTestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("forgel-missing", stderr)
 
+    def test_stub_rejects_the_flags_the_client_must_not_send(self) -> None:
+        # Sanity check of the stand-in: an invented ``--reason`` fails there
+        # exactly as it fails on the engine's ``task`` parser.
+        completed = subprocess.run(
+            [
+                str(self.bin_dir / "forgel"),
+                "task",
+                "reject",
+                "--reason",
+                "x",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            env=self.env,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("--reason", completed.stderr)
+
 
 class SessionTest(ClientTestCase):
     def test_default_project_is_local(self) -> None:
@@ -300,6 +384,7 @@ class SessionTest(ClientTestCase):
 
         session = Session(Path(self.env["FORGEL_CODE_HOME"]) / "session.json")
         self.assertEqual(session.project(), "local")
+        self.assertFalse(session.selected())
 
     def test_use_persists_the_active_project(self) -> None:
         from forgel_code.session import Session
@@ -309,6 +394,7 @@ class SessionTest(ClientTestCase):
         code, _, _ = self.run_client("use", "acme")
         self.assertEqual(code, 0)
         self.assertEqual(session.project(), "acme")
+        self.assertTrue(session.selected())
 
     def test_projects_command_goes_to_the_engine(self) -> None:
         code, _, _ = self.run_client("projects")
@@ -377,6 +463,7 @@ class PackagingTest(unittest.TestCase):
             "forgel tasks",
             "forgel task accept",
             "forgel task reject",
+            "--notes",
             "forgel plan",
             "forgel resume",
             "forgel pause",
@@ -386,6 +473,7 @@ class PackagingTest(unittest.TestCase):
         ):
             self.assertIn(fragment, readme)
         self.assertNotIn("no engine command", readme)
+        self.assertNotIn("--reason", readme)
 
 
 if __name__ == "__main__":

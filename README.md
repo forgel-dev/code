@@ -24,8 +24,9 @@ specific binary.
 ## Commands
 
 Every client command is a thin wrapper over an existing engine command, and
-the engine is always called with `--json`. `<key>` below is the active project
-of the client session.
+the engine is always called with `--json`. `<key>` below is the project the
+client session selected with `forgel-code use`; while nothing is selected the
+client passes no `--project` and the engine keeps its own active project.
 
 | Client command | Engine command | Purpose |
 | --- | --- | --- |
@@ -33,8 +34,8 @@ of the client session.
 | `forgel-code status` | `forgel status` | State of the task and the milestone |
 | `forgel-code tasks` | `forgel tasks` | List tasks |
 | `forgel-code task <task>` | `forgel tasks` | State of one task, picked out of the engine's task list |
-| `forgel-code accept <task>` | `forgel task accept --project <key> --task <task>` | Accept a task |
-| `forgel-code rework <task> [remark...]` | `forgel task reject --project <key> --task <task> --reason "<remark>"` | Send a task back for rework with remarks |
+| `forgel-code accept <task>` | `forgel task accept [--project <key>] --task <task>` | Accept a task |
+| `forgel-code rework <task> <remark...>` | `forgel task reject [--project <key>] --task <task> --notes "<remark>"` | Send a task back for rework with remarks |
 | `forgel-code resume` | `forgel resume` | Start or resume work |
 | `forgel-code pause` | `forgel pause` | Pause work |
 | `forgel-code plan <milestone> [goal...]` | `forgel plan <milestone> [--goal "<goal>"]` | Decompose the milestone goal into tasks |
@@ -63,9 +64,11 @@ with a non-zero code, and with `--json` it also prints one JSON object with
 ### Active project
 
 The active project is the client's own session, with the key `local` by
-default. `forgel-code use <key>` selects another project and persists the
-choice; `forgel-code projects` lists what the engine knows about. Set
-`FORGEL_CODE_HOME` to move the session file.
+default. `forgel-code use <key>` hands the key to the engine and, only when
+the engine accepts it, makes it the active project; `forgel-code projects`
+lists what the engine knows about. The default `local` label is never sent to
+the engine as a project, so the engine's own active project is used until you
+pick one explicitly. Set `FORGEL_CODE_HOME` to move the session file.
 
 ## Tests
 
