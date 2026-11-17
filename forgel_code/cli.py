@@ -37,6 +37,20 @@ COMMANDS = [
 # Keys the engine may use for the identifier of a task in its JSON answer.
 TASK_ID_KEYS = ("id", "task_id")
 
+# Client commands that lean on the engine's ``task`` action and the action name
+# they ask it for.
+TASK_ACTIONS = {"accept": "accept", "rework": "reject"}
+
+# Wording an engine uses when it does not provide the requested action at all.
+UNKNOWN_ACTION_MARKERS = (
+    "unknown",
+    "unrecognized",
+    "unrecognised",
+    "invalid choice",
+    "not a valid choice",
+    "no such command",
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -90,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("history", "show the short session history")
     add("projects", "list projects")
-    add("session", "show the active client session")
+    add("session", "show the session the engine reports")
 
     use = add("use", "select the active project")
     use.add_argument("key", metavar="key")
@@ -197,6 +211,27 @@ def select_task(payload: Any, task_id: str) -> Dict[str, Any]:
     raise EngineError("task %s is not in the engine's task list" % task_id, 1)
 
 
+def missing_engine_command(command: str, exc: EngineError) -> Optional[str]:
+    """Return an explicit report when the engine lacks the action, else ``None``.
+
+    ``accept`` and ``rework`` lean on the engine's ``task`` action. When the
+    running engine does not provide that action it answers with an unknown
+    command error; the client then says so explicitly instead of inventing
+    behaviour the engine does not have.
+    """
+    action = TASK_ACTIONS.get(command)
+    if action is None:
+        return None
+    text = exc.message.strip()
+    lowered = text.lower()
+    if not any(marker in lowered for marker in UNKNOWN_ACTION_MARKERS):
+        return None
+    return (
+        "forgel-code %s: the engine reports no engine command for this action "
+        "(`forgel task %s` is not available: %s)" % (command, action, text)
+    )
+
+
 def _report_failure(
     command: str, project: str, message: str, as_json: bool, returncode: int
 ) -> int:
@@ -242,8 +277,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             session.save_project(args.key)
             project = args.key
     except EngineError as exc:
+        message = missing_engine_command(command, exc) or exc.message
         return _report_failure(
-            command, project, exc.message, as_json, exc.returncode or 1
+            command, project, message, as_json, exc.returncode or 1
         )
 
     if as_json:

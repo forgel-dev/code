@@ -41,12 +41,17 @@ client passes no `--project` and the engine keeps its own active project.
 | `forgel-code plan <milestone> [goal...]` | `forgel plan <milestone> [--goal "<goal>"]` | Decompose the milestone goal into tasks |
 | `forgel-code history` | `forgel history` | Short session history |
 | `forgel-code projects` | `forgel projects` | List projects |
-| `forgel-code session` | `forgel session` | Show the active client session |
+| `forgel-code session` | `forgel session` | Show the session the engine reports |
 | `forgel-code use <key>` | `forgel use <key>` | Select the active project |
 
 `forgel-code` does not read a project itself: `task <task>` asks the engine for
 its task list and shows the one task you named. If that task is not in the
 engine's answer, the client reports it and exits with a non-zero code.
+
+`accept` and `rework` lean on the engine's `task` action. When the running
+engine does not provide that action, the client prints the engine's own
+message plus an explicit note that there is no engine command for this point,
+and exits with a non-zero code instead of inventing behaviour.
 
 ### Output
 

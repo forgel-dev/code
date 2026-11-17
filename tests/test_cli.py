@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT))
 # The stub mirrors the shape of the real engine's ``task`` and ``use``
 # subparsers: it only knows the flags the engine really has, so a client that
 # invents ``--reason`` (or any other unknown option) fails here like it fails
-# against the engine.
+# against the engine. ``FORGEL_STUB_MODE=no-task-action`` models an engine that
+# has no ``task`` action at all.
 STUB_ENGINE = textwrap.dedent(
     """\
     import json
@@ -35,6 +36,9 @@ STUB_ENGINE = textwrap.dedent(
     if mode == "error":
         sys.stderr.write("engine refused: task is already closed\\n")
         sys.exit(3)
+    if mode == "no-task-action" and argv[:1] == ["task"]:
+        sys.stderr.write("engine: unknown command 'task'\\n")
+        sys.exit(2)
 
     # Argument contract of the engine commands the client is allowed to call.
     common_flags = {"--json", "--project"}
@@ -261,6 +265,19 @@ class AcceptReworkTest(ClientTestCase):
             ["task", "accept", "--task", "t-1", "--json"],
         )
 
+    def test_accept_uses_the_active_project(self) -> None:
+        # The project the client session made active is forwarded to the engine.
+        self.assertEqual(self.run_client("use", "acme")[0], 0)
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        argv = self.last_engine_argv()
+        self.assertEqual(argv[:2], ["task", "accept"])
+        self.assertIn("--project", argv)
+        self.assertEqual(argv[argv.index("--project") + 1], "acme")
+        self.assertIn("--task", argv)
+        self.assertEqual(argv[argv.index("--task") + 1], "t-1")
+
     def test_rework_reaches_the_engine_and_carries_remarks(self) -> None:
         code, _, stderr = self.run_client("rework", "t-1", "no", "tests")
         self.assertEqual(code, 0)
@@ -334,6 +351,43 @@ class AcceptReworkTest(ClientTestCase):
                 code, _, stderr = self.run_client(*args)
                 self.assertNotEqual(code, 0)
                 self.assertIn("engine refused", stderr)
+
+
+class MissingEngineCommandTest(ClientTestCase):
+    """FR-4: with no engine command the client says so, it invents nothing."""
+
+    def test_accept_reports_a_missing_engine_command(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "no-task-action"
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("no engine command", stderr)
+        self.assertIn("forgel task accept", stderr)
+        self.assertIn("unknown command", stderr)
+
+    def test_rework_reports_a_missing_engine_command(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "no-task-action"
+        code, _, stderr = self.run_client("rework", "t-1", "no tests")
+        self.assertNotEqual(code, 0)
+        self.assertIn("no engine command", stderr)
+        self.assertIn("forgel task reject", stderr)
+
+    def test_missing_engine_command_with_json_flag_emits_one_object(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "no-task-action"
+        code, stdout, stderr = self.run_client("accept", "t-1", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("no engine command", stderr)
+        parsed = json.loads(stdout)
+        self.assertFalse(parsed["ok"])
+        self.assertIn("no engine command", parsed["error"])
+
+    def test_other_engine_errors_are_passed_through_unchanged(self) -> None:
+        # An ordinary engine failure is not turned into the missing-command
+        # report; the engine's own text reaches the user as is.
+        self.env["FORGEL_STUB_MODE"] = "error"
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("engine refused: task is already closed", stderr)
+        self.assertNotIn("no engine command", stderr)
 
 
 class FailureTest(ClientTestCase):
@@ -472,8 +526,11 @@ class PackagingTest(unittest.TestCase):
             "forgel use",
         ):
             self.assertIn(fragment, readme)
-        self.assertNotIn("no engine command", readme)
         self.assertNotIn("--reason", readme)
+
+    def test_readme_documents_the_missing_engine_command_report(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("no engine command", readme)
 
 
 if __name__ == "__main__":
