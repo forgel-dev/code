@@ -11,24 +11,11 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .engine import Engine, EngineError
 from .render import render_human
 from .session import Session
-
-# Pareto scope items the engine has no command for yet. The client says so
-# instead of inventing behaviour.
-UNSUPPORTED = {
-    "accept": (
-        "the engine has no command to accept a task yet; "
-        "nothing was sent to the engine"
-    ),
-    "rework": (
-        "the engine has no command to send a task back for rework with remarks "
-        "yet; nothing was sent to the engine"
-    ),
-}
 
 # Commands from the Pareto scope, in help order.
 COMMANDS = [
@@ -47,7 +34,8 @@ COMMANDS = [
     "use",
 ]
 
-GLOBAL_FLAGS = ("--json", "--engine")
+# Keys the engine may use for the identifier of a task in its JSON answer.
+TASK_ID_KEYS = ("id", "task_id")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,20 +72,21 @@ def build_parser() -> argparse.ArgumentParser:
     task = add("task", "show the state of one task")
     task.add_argument("task_id", metavar="task")
 
-    accept = add("accept", "accept a task (no engine command yet)")
+    accept = add("accept", "accept a task")
     accept.add_argument("task_id", metavar="task")
 
-    rework = add(
-        "rework", "send a task back for rework with remarks (no engine command yet)"
-    )
+    rework = add("rework", "send a task back for rework with remarks")
     rework.add_argument("task_id", metavar="task")
-    rework.add_argument("remarks", nargs="*", metavar="remark")
+    rework.add_argument("remarks", nargs="+", metavar="remark")
 
     add("resume", "start or resume work")
     add("pause", "pause work")
 
     plan = add("plan", "decompose the milestone goal into tasks")
-    plan.add_argument("goal", nargs="*", metavar="goal")
+    plan.add_argument(
+        "milestone", nargs="?", metavar="milestone", help="milestone key"
+    )
+    plan.add_argument("goal", nargs="*", metavar="goal", help="milestone goal")
 
     add("history", "show the short session history")
     add("projects", "list projects")
@@ -139,19 +128,55 @@ def split_global_flags(argv: Sequence[str]) -> Tuple[List[str], bool, Optional[s
     return rest, as_json, engine
 
 
-def engine_arguments(args: argparse.Namespace) -> List[str]:
-    """Translate parsed client arguments into engine argv."""
+def engine_arguments(args: argparse.Namespace, project: str) -> List[str]:
+    """Translate parsed client arguments into the engine's own argv."""
     command = args.command
     if command == "say":
         return ["say", " ".join(args.phrase)]
     if command == "task":
-        return ["task", args.task_id]
+        # The engine reads tasks through its list command; the client picks the
+        # requested one out of that machine-readable answer.
+        return ["tasks"]
+    if command == "accept":
+        return ["task", "accept", "--project", project, "--task", args.task_id]
+    if command == "rework":
+        argv = ["task", "reject", "--project", project, "--task", args.task_id]
+        remarks = " ".join(args.remarks).strip()
+        if remarks:
+            argv.extend(["--reason", remarks])
+        return argv
+    if command == "plan":
+        if not args.milestone:
+            return ["plan"]
+        argv = ["plan", args.milestone]
+        goal = " ".join(args.goal).strip()
+        if goal:
+            argv.extend(["--goal", goal])
+        return argv
     if command == "use":
         return ["use", args.key]
-    if command == "plan":
-        goal = " ".join(args.goal).strip()
-        return ["plan", goal] if goal else ["plan"]
     return [command]
+
+
+def _walk(value: Any) -> Iterator[Any]:
+    yield value
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _walk(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk(item)
+
+
+def select_task(payload: Any, task_id: str) -> Dict[str, Any]:
+    """Pick the requested task out of the engine's task listing."""
+    for node in _walk(payload):
+        if not isinstance(node, dict):
+            continue
+        for key in TASK_ID_KEYS:
+            if key in node and str(node[key]) == task_id:
+                return node
+    raise EngineError("task %s is not in the engine's task list" % task_id, 1)
 
 
 def _report_failure(
@@ -182,12 +207,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     project = session.project()
     command = args.command
 
-    if command in UNSUPPORTED:
-        return _report_failure(command, project, UNSUPPORTED[command], as_json, 2)
-
     engine = Engine(engine_path or os.environ.get("FORGEL_ENGINE") or "forgel")
     try:
-        result = engine.run(engine_arguments(args))
+        result = engine.run(engine_arguments(args, project))
+        if command == "task":
+            result = select_task(result, args.task_id)
     except EngineError as exc:
         return _report_failure(
             command, project, exc.message, as_json, exc.returncode or 1

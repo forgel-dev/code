@@ -36,7 +36,13 @@ STUB_ENGINE = textwrap.dedent(
     """
 )
 
-PAYLOAD = {"ok": True, "task": {"id": "t-1", "state": "ready"}}
+PAYLOAD = {
+    "ok": True,
+    "tasks": [
+        {"id": "t-1", "state": "ready", "title": "add a login screen"},
+        {"id": "t-2", "state": "done", "title": "write the docs"},
+    ],
+}
 
 
 def _write_stub(directory: Path) -> Path:
@@ -126,15 +132,32 @@ class HelpTest(unittest.TestCase):
 
 
 class CommandTest(ClientTestCase):
+    # Every command from the Pareto scope with the engine argv it must produce.
+    # The engine's own ``--json`` flag is appended by the client.
     CASES = [
         (("say", "add", "a", "login", "screen"), ["say", "add a login screen"]),
         (("status",), ["status"]),
         (("tasks",), ["tasks"]),
-        (("task", "t-1"), ["task", "t-1"]),
+        (("task", "t-1"), ["tasks"]),
+        (("accept", "t-1"), ["task", "accept", "--project", "local", "--task", "t-1"]),
+        (
+            ("rework", "t-1", "the", "button", "is", "dead"),
+            [
+                "task",
+                "reject",
+                "--project",
+                "local",
+                "--task",
+                "t-1",
+                "--reason",
+                "the button is dead",
+            ],
+        ),
         (("resume",), ["resume"]),
         (("pause",), ["pause"]),
         (("plan",), ["plan"]),
-        (("plan", "ship", "v1"), ["plan", "ship v1"]),
+        (("plan", "m-1"), ["plan", "m-1"]),
+        (("plan", "m-1", "ship", "v1"), ["plan", "m-1", "--goal", "ship v1"]),
         (("history",), ["history"]),
         (("projects",), ["projects"]),
         (("session",), ["session"]),
@@ -147,7 +170,7 @@ class CommandTest(ClientTestCase):
                 code, stdout, stderr = self.run_client(*args)
                 self.assertEqual(code, 0)
                 self.assertEqual(stderr, "")
-                self.assertIn("state: ready", stdout)
+                self.assertIn("state:", stdout)
                 self.assertNotIn("{", stdout)
                 self.assertEqual(self.last_engine_argv(), expected + ["--json"])
 
@@ -161,7 +184,10 @@ class CommandTest(ClientTestCase):
                 self.assertIsInstance(parsed, dict)
                 self.assertTrue(parsed["ok"])
                 self.assertEqual(parsed["command"], args[0])
-                self.assertEqual(parsed["result"], PAYLOAD)
+                expected_result = PAYLOAD
+                if args[0] == "task":
+                    expected_result = PAYLOAD["tasks"][0]
+                self.assertEqual(parsed["result"], expected_result)
                 self.assertEqual(stdout.strip().count("\n"), 0)
                 self.assertEqual(self.last_engine_argv(), expected + ["--json"])
 
@@ -175,6 +201,74 @@ class CommandTest(ClientTestCase):
             with self.subTest(command=args[0]):
                 self.run_client(*args)
                 self.assertEqual(self.last_engine_argv()[-1], "--json")
+
+
+class TaskStateTest(ClientTestCase):
+    def test_task_shows_only_the_requested_task(self) -> None:
+        code, stdout, _ = self.run_client("task", "t-2")
+        self.assertEqual(code, 0)
+        self.assertIn("t-2", stdout)
+        self.assertIn("done", stdout)
+        self.assertNotIn("t-1", stdout)
+
+    def test_unknown_task_is_reported(self) -> None:
+        code, _, stderr = self.run_client("task", "t-404")
+        self.assertNotEqual(code, 0)
+        self.assertIn("t-404", stderr)
+
+        code, stdout, _ = self.run_client("task", "t-404", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("t-404", json.loads(stdout)["error"])
+
+
+class AcceptReworkTest(ClientTestCase):
+    def test_accept_reaches_the_engine(self) -> None:
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            self.last_engine_argv(),
+            ["task", "accept", "--project", "local", "--task", "t-1", "--json"],
+        )
+
+    def test_rework_reaches_the_engine_and_carries_remarks(self) -> None:
+        code, _, stderr = self.run_client("rework", "t-1", "no", "tests")
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            self.last_engine_argv(),
+            [
+                "task",
+                "reject",
+                "--project",
+                "local",
+                "--task",
+                "t-1",
+                "--reason",
+                "no tests",
+                "--json",
+            ],
+        )
+
+    def test_accept_uses_the_active_project(self) -> None:
+        self.assertEqual(self.run_client("use", "acme")[0], 0)
+        self.assertEqual(self.run_client("accept", "t-1")[0], 0)
+        self.assertIn("acme", self.last_engine_argv())
+
+    def test_rework_requires_remarks(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_client("rework", "t-1")
+
+    def test_accept_and_rework_report_engine_errors(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "error"
+        for command in ("accept", "rework"):
+            args = [command, "t-1"]
+            if command == "rework":
+                args.append("no tests")
+            with self.subTest(command=command):
+                code, _, stderr = self.run_client(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("engine refused", stderr)
 
 
 class FailureTest(ClientTestCase):
@@ -198,23 +292,6 @@ class FailureTest(ClientTestCase):
         code, _, stderr = self.run_client("--engine", "forgel-missing", "status")
         self.assertNotEqual(code, 0)
         self.assertIn("forgel-missing", stderr)
-
-    def test_unsupported_commands_are_reported_explicitly(self) -> None:
-        from forgel_code.cli import UNSUPPORTED
-
-        self.assertTrue(UNSUPPORTED)
-        for command in sorted(UNSUPPORTED):
-            with self.subTest(command=command):
-                code, _, stderr = self.run_client(command, "t-1")
-                self.assertNotEqual(code, 0)
-                self.assertIn("no command", stderr)
-                self.assertFalse(self.argv_file.exists())
-
-    def test_unsupported_command_with_json_flag(self) -> None:
-        code, stdout, _ = self.run_client("accept", "t-1", "--json")
-        self.assertNotEqual(code, 0)
-        parsed = json.loads(stdout)
-        self.assertFalse(parsed["ok"])
 
 
 class SessionTest(ClientTestCase):
@@ -291,6 +368,24 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("forgel-code", readme)
         for command in ("say", "status", "tasks", "task", "plan", "use"):
             self.assertIn(command, readme)
+
+    def test_readme_documents_the_engine_commands_the_client_calls(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for fragment in (
+            "forgel say",
+            "forgel status",
+            "forgel tasks",
+            "forgel task accept",
+            "forgel task reject",
+            "forgel plan",
+            "forgel resume",
+            "forgel pause",
+            "forgel history",
+            "forgel projects",
+            "forgel use",
+        ):
+            self.assertIn(fragment, readme)
+        self.assertNotIn("no engine command", readme)
 
 
 if __name__ == "__main__":

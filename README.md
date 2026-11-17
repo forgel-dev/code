@@ -24,23 +24,28 @@ specific binary.
 ## Commands
 
 Every client command is a thin wrapper over an existing engine command, and
-the engine is always called with `--json`.
+the engine is always called with `--json`. `<key>` below is the active project
+of the client session.
 
 | Client command | Engine command | Purpose |
 | --- | --- | --- |
-| `forgel-code say <phrase>` | `forgel say <phrase> --json` | Turn a free phrase into a task |
-| `forgel-code status` | `forgel status --json` | State of the task and the milestone |
-| `forgel-code tasks` | `forgel tasks --json` | List tasks |
-| `forgel-code task <task>` | `forgel task <task> --json` | State of one task |
-| `forgel-code accept <task>` | — | No engine command yet; reported explicitly |
-| `forgel-code rework <task> [remarks...]` | — | No engine command yet; reported explicitly |
-| `forgel-code resume` | `forgel resume --json` | Start or resume work |
-| `forgel-code pause` | `forgel pause --json` | Pause work |
-| `forgel-code plan [goal...]` | `forgel plan [goal] --json` | Decompose the milestone goal into tasks |
-| `forgel-code history` | `forgel history --json` | Short session history |
-| `forgel-code projects` | `forgel projects --json` | List projects |
-| `forgel-code session` | `forgel session --json` | Show the active client session |
-| `forgel-code use <key>` | `forgel use <key> --json` | Select the active project |
+| `forgel-code say <phrase>` | `forgel say "<phrase>"` | Turn a free phrase into a task |
+| `forgel-code status` | `forgel status` | State of the task and the milestone |
+| `forgel-code tasks` | `forgel tasks` | List tasks |
+| `forgel-code task <task>` | `forgel tasks` | State of one task, picked out of the engine's task list |
+| `forgel-code accept <task>` | `forgel task accept --project <key> --task <task>` | Accept a task |
+| `forgel-code rework <task> [remark...]` | `forgel task reject --project <key> --task <task> --reason "<remark>"` | Send a task back for rework with remarks |
+| `forgel-code resume` | `forgel resume` | Start or resume work |
+| `forgel-code pause` | `forgel pause` | Pause work |
+| `forgel-code plan <milestone> [goal...]` | `forgel plan <milestone> [--goal "<goal>"]` | Decompose the milestone goal into tasks |
+| `forgel-code history` | `forgel history` | Short session history |
+| `forgel-code projects` | `forgel projects` | List projects |
+| `forgel-code session` | `forgel session` | Show the active client session |
+| `forgel-code use <key>` | `forgel use <key>` | Select the active project |
+
+`forgel-code` does not read a project itself: `task <task>` asks the engine for
+its task list and shows the one task you named. If that task is not in the
+engine's answer, the client reports it and exits with a non-zero code.
 
 ### Output
 
@@ -61,12 +66,6 @@ The active project is the client's own session, with the key `local` by
 default. `forgel-code use <key>` selects another project and persists the
 choice; `forgel-code projects` lists what the engine knows about. Set
 `FORGEL_CODE_HOME` to move the session file.
-
-## Requirements the client does not cover
-
-Accepting a task and sending it back for rework with remarks have no engine
-command yet. The client says so instead of inventing behaviour; these will be
-wired once the engine exposes them.
 
 ## Tests
 
