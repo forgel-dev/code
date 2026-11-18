@@ -11,9 +11,10 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
-from .engine import Engine, EngineError
+from . import __version__
+from .engine import DEFAULT_TIMEOUT, Engine, EngineError
 from .render import render_human
 from .session import Session
 
@@ -38,47 +39,116 @@ COMMANDS = [
 TASK_ID_KEYS = ("id", "task_id")
 
 # ``accept`` and ``rework`` lean on the engine's ``task`` command, whose first
-# positional argument is the action. The value is the engine action each
-# client command maps to: ``forgel task accept`` and ``forgel task reject``.
+# positional argument is the action: ``forgel task accept`` and
+# ``forgel task reject``.
 TASK_ACTIONS = {"accept": "accept", "rework": "reject"}
 
-# Wording an engine uses when it does not provide the requested option or
-# command at all.
-UNKNOWN_ACTION_MARKERS = (
-    "unknown",
-    "unrecognized",
-    "unrecognised",
-    "invalid choice",
-    "not a valid choice",
-    "no such command",
-    "no such option",
+# The exit code the engine uses for a usage error: an unknown command or an
+# unknown action. The client reads it from the return code, never from text.
+ENGINE_USAGE_EXIT_CODE = 2
+
+# Engine commands that operate on the active project.
+PROJECT_SCOPED = frozenset(
+    [
+        "say",
+        "status",
+        "tasks",
+        "task",
+        "accept",
+        "rework",
+        "resume",
+        "pause",
+        "plan",
+        "history",
+        "projects",
+        "session",
+    ]
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="forgel-code",
-        description=(
-            "Thin console client for Forgel over the engine's machine-readable "
-            "commands."
-        ),
-    )
+class _ParserError(Exception):
+    """An argument-parse error, raised instead of ``SystemExit``."""
+
+
+class _ParserExit(Exception):
+    """A parser request to stop (help or version), instead of ``SystemExit``."""
+
+    def __init__(self, status: int = 0, message: Optional[str] = None) -> None:
+        super().__init__(message or "")
+        self.status = status
+        self.message = message
+
+
+class _Parser(argparse.ArgumentParser):
+    """An ``ArgumentParser`` whose exits become exceptions the caller handles."""
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        raise _ParserError(message)
+
+    def exit(
+        self, status: int = 0, message: Optional[str] = None
+    ) -> None:  # type: ignore[override]
+        raise _ParserExit(status, message)
+
+
+def _global_options() -> argparse.ArgumentParser:
+    """The parser that declares the global options exactly once.
+
+    Every command parser inherits it through ``parents``, so ``--json``,
+    ``--engine`` and ``--timeout`` are accepted before and after the command
+    while being declared in a single place. ``SUPPRESS`` keeps a subparser from
+    overwriting a value the main parser already stored.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="print exactly one JSON object to stdout",
     )
     parser.add_argument(
         "--engine",
         metavar="PATH",
+        default=argparse.SUPPRESS,
         help="engine executable to run (default: $FORGEL_ENGINE or 'forgel')",
+    )
+    parser.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=(
+            "seconds to wait for the engine "
+            "(default: $FORGEL_CODE_TIMEOUT or %g)" % DEFAULT_TIMEOUT
+        ),
+    )
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    global_options = _global_options()
+    parser = _Parser(
+        prog="forgel-code",
+        description=(
+            "Thin console client for Forgel over the engine's machine-readable "
+            "commands."
+        ),
+        parents=[global_options],
+    )
+    parser.add_argument(
+        "--version", action="version", version="forgel-code %s" % __version__
     )
 
     sub = parser.add_subparsers(dest="command", metavar="command", required=True)
 
     def add(name: str, help_text: str) -> argparse.ArgumentParser:
-        return sub.add_parser(name, help=help_text, description=help_text)
+        return sub.add_parser(
+            name,
+            help=help_text,
+            description=help_text,
+            parents=[global_options],
+        )
 
     say = add("say", "turn a free phrase into a task")
     say.add_argument("phrase", nargs="+", metavar="phrase", help="free phrase")
@@ -94,16 +164,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     rework = add("rework", "send a task back for rework with remarks")
     rework.add_argument("task_id", metavar="task")
-    rework.add_argument("remarks", nargs="+", metavar="remark")
+    rework.add_argument("remarks", nargs="+", metavar="remarks")
 
     add("resume", "start or resume work")
     add("pause", "pause work")
 
     plan = add("plan", "decompose the milestone goal into tasks")
-    plan.add_argument(
-        "milestone", nargs="?", metavar="milestone", help="milestone key"
-    )
     plan.add_argument("goal", nargs="*", metavar="goal", help="milestone goal")
+    plan.add_argument(
+        "--milestone",
+        metavar="KEY",
+        default=None,
+        help="milestone key the goal belongs to",
+    )
 
     add("history", "show the short session history")
     add("projects", "list projects")
@@ -115,57 +188,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def split_global_flags(argv: Sequence[str]) -> Tuple[List[str], bool, Optional[str]]:
-    """Pull ``--json`` and ``--engine`` out of argv wherever they appear.
-
-    Doing it before parsing keeps the flags interchangeable in front of and
-    behind the command name. Everything after ``--`` is left untouched.
-    """
-    rest: List[str] = []
-    as_json = False
-    engine: Optional[str] = None
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token == "--":
-            rest.extend(argv[index:])
-            break
-        if token == "--json":
-            as_json = True
-        elif token == "--engine":
-            index += 1
-            if index >= len(argv):
-                raise ValueError("--engine needs a path")
-            engine = argv[index]
-        elif token.startswith("--engine="):
-            engine = token.split("=", 1)[1]
-        else:
-            rest.append(token)
-        index += 1
-    return rest, as_json, engine
-
-
 def engine_arguments(args: argparse.Namespace, project: Optional[str]) -> List[str]:
     """Translate parsed client arguments into the engine's own argv.
 
-    ``project`` is a project key the engine already accepted through
-    ``forgel-code use``; while the user has not picked one it stays ``None`` so
-    the engine keeps its own active project and never sees the client's local
-    session label.
+    ``project`` is the project key the engine accepted through
+    ``forgel-code use``. While no project has been selected it stays ``None``
+    and no ``--project`` argument is passed at all.
     """
     command = args.command
 
     def with_project(argv: List[str]) -> List[str]:
-        if project:
+        if command in PROJECT_SCOPED and project:
             return argv + ["--project", project]
         return argv
 
     if command == "say":
-        return ["say", " ".join(args.phrase)]
+        return with_project(["say", " ".join(args.phrase)])
     if command == "task":
         # The engine reads tasks through its list command; the client picks the
         # requested one out of that machine-readable answer.
-        return ["tasks"]
+        return with_project(["tasks"])
     if command == "accept":
         # The engine's ``task`` command takes the action as its first
         # positional argument: a task is accepted with ``task accept``.
@@ -180,62 +222,85 @@ def engine_arguments(args: argparse.Namespace, project: Optional[str]) -> List[s
             ["task", "reject", "--task", args.task_id, "--notes", remarks]
         )
     if command == "plan":
-        if not args.milestone:
-            return ["plan"]
-        argv = ["plan", args.milestone]
+        # The free text is the goal; the milestone is an explicit option.
+        argv = ["plan"]
+        if args.milestone:
+            argv.append(args.milestone)
         goal = " ".join(args.goal).strip()
         if goal:
             argv.extend(["--goal", goal])
-        return argv
+        return with_project(argv)
     if command == "use":
         return ["use", args.key]
-    return [command]
+    return with_project([command])
 
 
-def _walk(value: Any) -> Iterator[Any]:
-    yield value
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _walk(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _walk(item)
+def _listing_entries(payload: Any) -> List[Any]:
+    """The top-level entries of the engine's task listing."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("tasks", "items", "result"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
 
 
 def select_task(payload: Any, task_id: str) -> Dict[str, Any]:
-    """Pick the requested task out of the engine's task listing."""
-    for node in _walk(payload):
-        if not isinstance(node, dict):
+    """Pick the requested task out of the top-level entries of the listing."""
+    matches: List[Dict[str, Any]] = []
+    for entry in _listing_entries(payload):
+        if not isinstance(entry, dict):
             continue
         for key in TASK_ID_KEYS:
-            if key in node and str(node[key]) == task_id:
-                return node
-    raise EngineError("task %s is not in the engine's task list" % task_id, 1)
+            if key in entry and str(entry[key]) == task_id:
+                matches.append(entry)
+                break
+    if not matches:
+        raise EngineError("task %s is not in the engine's task list" % task_id, 1)
+    if len(matches) > 1:
+        raise EngineError(
+            "task %s is ambiguous: the engine's task list has %d entries with "
+            "that id" % (task_id, len(matches)),
+            1,
+        )
+    return matches[0]
 
 
 def missing_engine_command(command: str, exc: EngineError) -> Optional[str]:
     """Return an explicit report when the engine lacks the action, else ``None``.
 
-    ``accept`` and ``rework`` lean on the engine's ``task`` command and its
-    positional actions. When the running engine does not provide the action
-    they need, it answers with an unknown command/action error; the client then
-    says so explicitly instead of inventing behaviour the engine lacks.
+    The decision rests on the engine's return code and structured fields, never
+    on the human-readable wording of its message, so it is locale-independent.
     """
     action = TASK_ACTIONS.get(command)
     if action is None:
         return None
-    text = exc.message.strip()
-    lowered = text.lower()
-    if not any(marker in lowered for marker in UNKNOWN_ACTION_MARKERS):
+    if exc.returncode != ENGINE_USAGE_EXIT_CODE:
+        return None
+    payload = exc.payload or {}
+    code = payload.get("code") or payload.get("kind")
+    if code is not None and str(code) not in (
+        "unknown_command",
+        "unknown_action",
+        "usage",
+        "invalid_choice",
+    ):
         return None
     return (
         "forgel-code %s: the engine reports no engine command for this action "
-        "(`forgel task %s` is not available: %s)" % (command, action, text)
+        "(`forgel task %s` is not available: %s)" % (command, action, exc.message)
     )
 
 
 def _report_failure(
-    command: str, project: str, message: str, as_json: bool, returncode: int
+    command: Optional[str],
+    project: Optional[str],
+    message: str,
+    as_json: bool,
+    returncode: int,
+    engine_error: Optional[Dict[str, Any]] = None,
 ) -> int:
     print(message, file=sys.stderr)
     if as_json:
@@ -245,49 +310,93 @@ def _report_failure(
             "ok": False,
             "error": message,
         }
+        if engine_error is not None:
+            payload["engine_error"] = engine_error
         print(json.dumps(payload, ensure_ascii=False))
     return returncode
+
+
+def resolve_timeout(option: Optional[float]) -> float:
+    """Option, then ``$FORGEL_CODE_TIMEOUT``, then the default."""
+    if option is not None:
+        return option
+    raw = os.environ.get("FORGEL_CODE_TIMEOUT")
+    if raw is None or not raw.strip():
+        return DEFAULT_TIMEOUT
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(
+            "FORGEL_CODE_TIMEOUT must be a number of seconds, got %r" % raw
+        ) from None
+
+
+def _json_requested(raw: Sequence[str]) -> bool:
+    """Whether the caller asked for JSON even when parsing did not get that far.
+
+    Nothing is removed from argv here; this only decides the shape of the
+    error report for an argv that failed to parse.
+    """
+    return "--json" in raw
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     try:
-        rest, as_json, engine_path = split_global_flags(raw)
-    except ValueError as exc:
-        parser.error(str(exc))
-    args = parser.parse_args(rest)
+        args = parser.parse_args(raw)
+    except _ParserError as exc:
+        return _report_failure(None, None, str(exc), _json_requested(raw), 2)
+    except _ParserExit as exc:
+        if exc.message:
+            sys.stdout.write(exc.message)
+        return exc.status
+
+    as_json = bool(getattr(args, "json_output", False))
+    command = args.command
 
     session = Session()
-    # The session key names the active project on the client side.
-    project = session.project()
     # Only a key the engine accepted is handed back to the engine.
-    engine_project = project if session.selected() else None
-    command = args.command
+    engine_project = session.project() if session.selected() else None
+
+    try:
+        timeout = resolve_timeout(getattr(args, "timeout", None))
+    except ValueError as exc:
+        return _report_failure(command, engine_project, str(exc), as_json, 2)
 
     try:
         arguments = engine_arguments(args, engine_project)
     except ValueError as exc:
-        parser.error(str(exc))
+        return _report_failure(command, engine_project, str(exc), as_json, 2)
 
-    engine = Engine(engine_path or os.environ.get("FORGEL_ENGINE") or "forgel")
+    configured = getattr(args, "engine", None)
+    binary = configured or os.environ.get("FORGEL_ENGINE") or "forgel"
+    engine = Engine(binary, timeout)
+    # The project the JSON envelope reports: the key actually handed to the
+    # engine, never the client's local session label.
+    reported_project = engine_project
     try:
         result = engine.run(arguments)
         if command == "task":
             result = select_task(result, args.task_id)
         if command == "use":
             session.save_project(args.key)
-            project = args.key
+            reported_project = args.key
     except EngineError as exc:
         message = missing_engine_command(command, exc) or exc.message
         return _report_failure(
-            command, project, message, as_json, exc.returncode or 1
+            command,
+            engine_project,
+            message,
+            as_json,
+            exc.returncode or 1,
+            exc.payload,
         )
 
     if as_json:
         payload = {
             "command": command,
-            "project": project,
+            "project": reported_project,
             "ok": True,
             "result": result,
         }

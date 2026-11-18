@@ -11,10 +11,15 @@ project files and never runs checks itself.
 
 ## Install
 
-From the repository, one command:
+Install a pinned revision — a tag, a commit or an exact version — never the
+moving default branch:
 
 ```sh
-pipx install git+https://github.com/forgel-dev/code   # or: pip install .
+pipx install "git+https://github.com/forgel-dev/code@v0.1.0"
+# or, from a pinned checkout:
+pip install "git+https://github.com/forgel-dev/code@<commit-sha>"
+# or, from a package index once a release is published:
+pip install "forgel-code==0.1.0"
 ```
 
 This provides the executable `forgel-code`. The build has no dependencies: the
@@ -22,6 +27,22 @@ repository ships a small in-tree PEP 517 backend (`_build_backend.py`), so the
 install works offline and does not need setuptools or a package index. The
 engine (`forgel`) must be available on `PATH`; use `--engine PATH` or
 `$FORGEL_ENGINE` to point at a specific binary.
+
+Editable installs (`pip install -e`) are not supported: the in-tree backend
+implements only the `build_wheel` and `build_sdist` PEP 517 hooks.
+
+### Update
+
+Updating means pinning a newer revision. Pick the tag, commit or version you
+want and reinstall it, replacing the old one:
+
+```sh
+pipx install --force "git+https://github.com/forgel-dev/code@v0.1.1"
+# or, with plain pip:
+pip install --upgrade "forgel-code==0.1.1"
+```
+
+`forgel-code --version` prints the version that is actually installed.
 
 ## Commands
 
@@ -40,7 +61,7 @@ client passes no `--project` and the engine keeps its own active project.
 | `forgel-code rework <task> <remark...>` | `forgel task reject --task <task> --notes "<remark>" [--project <key>]` | Send a task back for rework with remarks |
 | `forgel-code resume` | `forgel resume` | Start or resume work |
 | `forgel-code pause` | `forgel pause` | Pause work |
-| `forgel-code plan <milestone> [goal...]` | `forgel plan <milestone> [--goal "<goal>"]` | Decompose the milestone goal into tasks |
+| `forgel-code plan "<goal>" [--milestone <key>]` | `forgel plan [<key>] --goal "<goal>"` | Decompose the milestone goal into tasks |
 | `forgel-code history` | `forgel history` | Short session history |
 | `forgel-code projects` | `forgel projects` | List projects |
 | `forgel-code session` | `forgel session` | Show the session the engine reports |
@@ -48,7 +69,8 @@ client passes no `--project` and the engine keeps its own active project.
 
 `forgel-code` does not read a project itself: `task <task>` asks the engine for
 its task list and shows the one task you named. If that task is not in the
-engine's answer, the client reports it and exits with a non-zero code.
+engine's answer — or appears there more than once — the client reports it and
+exits with a non-zero code.
 
 `accept` and `rework` lean on the engine's `task` command and its positional
 actions: accepting is `task accept`, sending back is `task reject`, and the
@@ -63,6 +85,9 @@ forgel task reject --task <task> --notes "<remark>" --json
 When the running engine does not provide the action a point needs, the client
 prints the engine's own message plus an explicit note ("no engine command for
 this point") and exits with a non-zero code instead of inventing behaviour.
+That decision is taken from the engine's return code and structured error
+fields, never from the wording of its message, so it does not depend on the
+locale.
 
 ### Output
 
@@ -70,21 +95,30 @@ Without a flag a command prints human readable text. With `--json` it prints
 exactly one JSON object to stdout:
 
 ```json
-{"command": "status", "project": "local", "ok": true, "result": {}}
+{"command": "status", "project": "acme", "ok": true, "result": {}}
 ```
 
-On failure the engine's own message is printed to stderr, the client exits
-with a non-zero code, and with `--json` it also prints one JSON object with
-`"ok": false` and the message under `error`.
+The `project` field is the project key actually handed to the engine, or `null`
+when nothing was passed. On failure — including an argument-parse error — the
+client exits with a non-zero code and, with `--json`, prints one JSON object
+with `"ok": false` and the message under `error`. A structured engine refusal
+(`"ok": false` in the engine's answer) is a failure even when the engine exits
+with code 0, and its own fields are carried through.
 
 ### Active project
 
-The active project is the client's own session, with the key `local` by
-default. `forgel-code use <key>` hands the key to the engine and, only when
-the engine accepts it, makes it the active project; `forgel-code projects`
-lists what the engine knows about. The default `local` label is never sent to
-the engine as a project, so the engine's own active project is used until you
-pick one explicitly. Set `FORGEL_CODE_HOME` to move the session file.
+`forgel-code use <key>` hands the key to the engine and, only when the engine
+accepts it, makes it the active project; every project-scoped command then
+passes `--project <key>`. `forgel-code projects` lists what the engine knows
+about. Until you pick a key no `--project` argument is sent, so the engine's own
+active project is used. Set `FORGEL_CODE_HOME` to move the session file.
+
+### Timeout
+
+The engine call is bounded. `--timeout SECONDS` sets the limit for one call,
+`$FORGEL_CODE_TIMEOUT` sets it for the environment, and the default is 600
+seconds. The engine's stdout is always decoded as UTF-8 and the child process
+does not receive the client's stdin.
 
 ## Tests
 

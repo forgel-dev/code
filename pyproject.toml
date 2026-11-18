@@ -1,13 +1,16 @@
 [build-system]
 # The client has no runtime dependencies, so its build backend is the tiny
-# in-tree one below: `pip install .` works without network access or setuptools.
+# in-tree one below: installing a pinned revision works without network access
+# or setuptools.
 requires = []
 build-backend = "_build_backend"
 backend-path = ["."]
 
 [project]
 name = "forgel-code"
-version = "0.1.0"
+# The version has a single source: `forgel_code/__init__.py:__version__`. The
+# in-tree backend reads it from there, so no literal is repeated here.
+dynamic = ["version"]
 description = "Thin console client for Forgel over the engine's machine-readable commands"
 readme = "README.md"
 requires-python = ">=3.9"

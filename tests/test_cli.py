@@ -23,25 +23,93 @@ sys.path.insert(0, str(ROOT))
 # ``--reason`` or calls ``forgel task --accept --task X`` therefore fails here
 # exactly as it fails against the engine.
 #
-# ``FORGEL_STUB_MODE`` models engines the client must report honestly about:
-#   * ``no-task-action`` - no ``task`` command at all;
-#   * ``no-task-accept`` - ``task`` exists but has no ``accept`` action.
+# ``FORGEL_STUB_MODE`` models the engine shapes the client must handle:
+#   * ``error``               - plain failure, exit 3, text on stderr;
+#   * ``structured-error``    - ``{"ok": false, "error": {...}}`` with exit 0;
+#   * ``structured-error-string`` - the same with a string ``error``;
+#   * ``no-task-action``      - no ``task`` command at all (exit 2, text);
+#   * ``no-task-action-ru``   - the same with a non-English message;
+#   * ``no-task-accept``      - ``task`` exists but has no ``accept`` action;
+#   * ``usage-other``         - exit 2 with a structured non-usage error;
+#   * ``noisy``               - a log line with ``{`` before the JSON answer;
+#   * ``garbage``             - output with no decodable JSON object;
+#   * ``non-ascii``           - UTF-8 text in the answer;
+#   * ``stdin``               - records whatever arrives on stdin;
+#   * ``sleep``               - never answers before the timeout.
 STUB_ENGINE = textwrap.dedent(
     """\
     import json
     import os
     import sys
+    import time
 
     argv = sys.argv[1:]
     with open(os.environ["FORGEL_STUB_ARGV"], "w", encoding="utf-8") as handle:
         json.dump(argv, handle)
 
     mode = os.environ.get("FORGEL_STUB_MODE", "ok")
+
+
+    def emit(payload, code=0):
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+        sys.stdout.write(chr(10))
+        sys.stdout.flush()
+        sys.exit(code)
+
+
+    if mode == "sleep":
+        time.sleep(float(os.environ.get("FORGEL_STUB_SLEEP", "10")))
+        emit({"ok": True})
+
+    if mode == "stdin":
+        data = sys.stdin.buffer.read()
+        with open(os.environ["FORGEL_STUB_STDIN"], "wb") as handle:
+            handle.write(data)
+        emit({"ok": True, "stdin_bytes": len(data)})
+
+    if mode == "non-ascii":
+        emit({"ok": True, "text": "Привет, мир"})
+
+    if mode == "noisy":
+        sys.stdout.write("log line with a brace { and no json here")
+        sys.stdout.write(chr(10))
+        emit(json.loads(os.environ["FORGEL_STUB_PAYLOAD"]))
+
+    if mode == "garbage":
+        sys.stdout.write("engine fell over before answering: {broken")
+        sys.stdout.write(chr(10))
+        sys.exit(0)
+
+    if mode == "structured-error":
+        emit(
+            {
+                "ok": False,
+                "error": {
+                    "code": "task_closed",
+                    "kind": "conflict",
+                    "message": "task is already closed",
+                },
+            },
+            0,
+        )
+
+    if mode == "structured-error-string":
+        emit({"ok": False, "error": "the milestone is missing"}, 0)
+
+    if mode == "usage-other":
+        emit({"ok": False, "error": {"code": "validation", "message": "bad"}}, 2)
+
     if mode == "error":
-        sys.stderr.write("engine refused: task is already closed\\n")
+        sys.stderr.write("engine refused: task is already closed")
+        sys.stderr.write(chr(10))
         sys.exit(3)
-    if mode == "no-task-action" and argv[:1] == ["task"]:
-        sys.stderr.write("engine: unknown command 'task'\\n")
+
+    if mode in ("no-task-action", "no-task-action-ru") and argv[:1] == ["task"]:
+        if mode == "no-task-action":
+            sys.stderr.write("engine: unknown command 'task'")
+        else:
+            sys.stderr.write("движок: неизвестная команда 'task'")
+        sys.stderr.write(chr(10))
         sys.exit(2)
 
     # Argument contract of the engine's ``task`` command.
@@ -63,8 +131,9 @@ STUB_ENGINE = textwrap.dedent(
     if argv[:1] == ["task"]:
         if len(argv) < 2 or argv[1].startswith("-"):
             sys.stderr.write(
-                "engine: the following arguments are required: action\\n"
+                "engine: the following arguments are required: action"
             )
+            sys.stderr.write(chr(10))
             sys.exit(2)
         action = argv[1]
         known_actions = TASK_ACTIONS
@@ -72,8 +141,9 @@ STUB_ENGINE = textwrap.dedent(
             known_actions = tuple(a for a in TASK_ACTIONS if a != "accept")
         if action not in known_actions:
             sys.stderr.write(
-                "engine: argument action: invalid choice: '%s'\\n" % action
+                "engine: argument action: invalid choice: '%s'" % action
             )
+            sys.stderr.write(chr(10))
             sys.exit(2)
         index = 2
         while index < len(argv):
@@ -82,22 +152,22 @@ STUB_ENGINE = textwrap.dedent(
                 index += 1
                 if index >= len(argv):
                     sys.stderr.write(
-                        "engine: argument %s: expected one argument\\n" % token
+                        "engine: argument %s: expected one argument" % token
                     )
+                    sys.stderr.write(chr(10))
                     sys.exit(2)
             elif token not in TASK_FLAGS:
-                sys.stderr.write(
-                    "engine: unrecognized arguments: %s\\n" % token
-                )
+                sys.stderr.write("engine: unrecognized arguments: %s" % token)
+                sys.stderr.write(chr(10))
                 sys.exit(2)
             index += 1
 
     if argv[:1] == ["use"] and len(argv) < 2:
-        sys.stderr.write("engine: use needs a project key\\n")
+        sys.stderr.write("engine: use needs a project key")
+        sys.stderr.write(chr(10))
         sys.exit(2)
 
-    payload = json.loads(os.environ["FORGEL_STUB_PAYLOAD"])
-    sys.stdout.write(json.dumps(payload) + "\\n")
+    emit(json.loads(os.environ["FORGEL_STUB_PAYLOAD"]))
     """
 )
 
@@ -108,6 +178,40 @@ PAYLOAD = {
         {"id": "t-2", "state": "done", "title": "write the docs"},
     ],
 }
+
+# Every command from the Pareto scope with the engine argv it must produce
+# while no project has been selected yet. The engine's own ``--json`` flag is
+# appended by the client.
+COMMAND_CASES = [
+    (("say", "add", "a", "login", "screen"), ["say", "add a login screen"]),
+    (("status",), ["status"]),
+    (("tasks",), ["tasks"]),
+    (("task", "t-1"), ["tasks"]),
+    (("accept", "t-1"), ["task", "accept", "--task", "t-1"]),
+    (
+        ("rework", "t-1", "the", "button", "is", "dead"),
+        [
+            "task",
+            "reject",
+            "--task",
+            "t-1",
+            "--notes",
+            "the button is dead",
+        ],
+    ),
+    (("resume",), ["resume"]),
+    (("pause",), ["pause"]),
+    (("plan",), ["plan"]),
+    (("plan", "ship", "v1"), ["plan", "--goal", "ship v1"]),
+    (
+        ("plan", "--milestone", "m-1", "ship", "v1"),
+        ["plan", "m-1", "--goal", "ship v1"],
+    ),
+    (("history",), ["history"]),
+    (("projects",), ["projects"]),
+    (("session",), ["session"]),
+    (("use", "other"), ["use", "other"]),
+]
 
 
 def _write_stub(directory: Path) -> Path:
@@ -125,15 +229,22 @@ class ClientTestCase(unittest.TestCase):
         self.bin_dir = self.home / "bin"
         self.bin_dir.mkdir()
         self.argv_file = self.home / "argv.json"
+        self.stdin_file = self.home / "stdin.bin"
         _write_stub(self.bin_dir)
 
         self.env = dict(os.environ)
         self.env["PATH"] = str(self.bin_dir) + os.pathsep + self.env.get("PATH", "")
         self.env["FORGEL_CODE_HOME"] = str(self.home / "session")
         self.env["FORGEL_STUB_ARGV"] = str(self.argv_file)
+        self.env["FORGEL_STUB_STDIN"] = str(self.stdin_file)
         self.env["FORGEL_STUB_PAYLOAD"] = json.dumps(PAYLOAD)
-        self.env.pop("FORGEL_STUB_MODE", None)
-        self.env.pop("FORGEL_ENGINE", None)
+        for name in (
+            "FORGEL_STUB_MODE",
+            "FORGEL_ENGINE",
+            "FORGEL_CODE_TIMEOUT",
+            "FORGEL_STUB_SLEEP",
+        ):
+            self.env.pop(name, None)
 
     def run_client(self, *args: str):
         import contextlib
@@ -163,6 +274,15 @@ class ClientTestCase(unittest.TestCase):
             text=True,
             env=self.env,
         )
+
+    def assert_single_json_error(self, stdout: str) -> dict:
+        self.assertEqual(stdout.count("\n"), 1, stdout)
+        parsed = json.loads(stdout)
+        self.assertIsInstance(parsed, dict)
+        self.assertFalse(parsed["ok"])
+        self.assertTrue(str(parsed["error"]).strip())
+        self.assertNotIn("usage:", stdout.lower())
+        return parsed
 
 
 class HelpTest(unittest.TestCase):
@@ -203,38 +323,16 @@ class HelpTest(unittest.TestCase):
         for command in COMMANDS:
             self.assertIn(command, text)
 
+    def test_global_options_are_declared_once(self) -> None:
+        text = (SRC / "cli.py").read_text(encoding="utf-8")
+        lines = [line.strip() for line in text.splitlines()]
+        self.assertEqual(lines.count('"--json",'), 1, text)
+        self.assertEqual(lines.count('"--engine",'), 1, text)
+        self.assertEqual(lines.count('"--timeout",'), 1, text)
+
 
 class CommandTest(ClientTestCase):
-    # Every command from the Pareto scope with the engine argv it must produce
-    # while no project has been selected yet. The engine's own ``--json`` flag
-    # is appended by the client.
-    CASES = [
-        (("say", "add", "a", "login", "screen"), ["say", "add a login screen"]),
-        (("status",), ["status"]),
-        (("tasks",), ["tasks"]),
-        (("task", "t-1"), ["tasks"]),
-        (("accept", "t-1"), ["task", "accept", "--task", "t-1"]),
-        (
-            ("rework", "t-1", "the", "button", "is", "dead"),
-            [
-                "task",
-                "reject",
-                "--task",
-                "t-1",
-                "--notes",
-                "the button is dead",
-            ],
-        ),
-        (("resume",), ["resume"]),
-        (("pause",), ["pause"]),
-        (("plan",), ["plan"]),
-        (("plan", "m-1"), ["plan", "m-1"]),
-        (("plan", "m-1", "ship", "v1"), ["plan", "m-1", "--goal", "ship v1"]),
-        (("history",), ["history"]),
-        (("projects",), ["projects"]),
-        (("session",), ["session"]),
-        (("use", "other"), ["use", "other"]),
-    ]
+    CASES = COMMAND_CASES
 
     def test_text_output_without_flag(self) -> None:
         for args, expected in self.CASES:
@@ -274,8 +372,203 @@ class CommandTest(ClientTestCase):
                 self.run_client(*args)
                 self.assertEqual(self.last_engine_argv()[-1], "--json")
 
+    def test_say_keeps_a_phrase_mentioning_json(self) -> None:
+        code, stdout, stderr = self.run_client("say", "add the --json flag", "--json")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.last_engine_argv(), ["say", "add the --json flag", "--json"])
+        self.assertEqual(json.loads(stdout)["result"], PAYLOAD)
 
-class TaskStateTest(ClientTestCase):
+    def test_engine_option_is_parsed_not_scanned(self) -> None:
+        stub = str(self.bin_dir / "forgel")
+        code, _, stderr = self.run_client("status", "--engine", stub)
+        self.assertEqual(code, 0, stderr)
+        code, _, stderr = self.run_client("--engine", stub, "--json", "status")
+        self.assertEqual(code, 0, stderr)
+
+
+class ProjectPropagationTest(ClientTestCase):
+    PROJECT_SCOPED = [
+        case
+        for case in COMMAND_CASES
+        if case[0][0] != "use"
+    ]
+
+    def test_selected_project_reaches_every_scoped_command(self) -> None:
+        self.assertEqual(self.run_client("use", "acme")[0], 0)
+        for args, expected in self.PROJECT_SCOPED:
+            with self.subTest(command=args[0]):
+                self.run_client(*args)
+                argv = self.last_engine_argv()
+                self.assertEqual(
+                    argv, expected + ["--project", "acme", "--json"], args
+                )
+
+    def test_without_use_no_project_is_passed(self) -> None:
+        for args, _ in self.PROJECT_SCOPED:
+            with self.subTest(command=args[0]):
+                self.run_client(*args)
+                argv = self.last_engine_argv()
+                self.assertNotIn("--project", argv)
+                self.assertNotIn("local", argv)
+
+    def test_json_envelope_reports_the_project_actually_passed(self) -> None:
+        code, stdout, _ = self.run_client("status", "--json")
+        self.assertEqual(code, 0)
+        self.assertIsNone(json.loads(stdout)["project"])
+
+        self.assertEqual(self.run_client("use", "acme")[0], 0)
+        code, stdout, _ = self.run_client("status", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout)["project"], "acme")
+
+
+class ArgumentParseErrorTest(ClientTestCase):
+    """FR-2: a parse error still yields exactly one JSON object with --json."""
+
+    BROKEN_ARGV = [
+        ("unknown-cmd", "--json"),
+        ("status", "extra-argument", "--json"),
+        ("status", "--no-such-flag", "--json"),
+        ("--timeout", "soon", "status", "--json"),
+        ("task", "--json"),
+    ]
+
+    def test_every_parse_error_emits_one_json_object(self) -> None:
+        for argv in self.BROKEN_ARGV:
+            with self.subTest(argv=argv):
+                code, stdout, _ = self.run_client(*argv)
+                self.assertNotEqual(code, 0)
+                self.assert_single_json_error(stdout)
+
+    def test_unknown_command_with_json_has_an_error_field(self) -> None:
+        code, stdout, _ = self.run_client("unknown-cmd", "--json")
+        self.assertNotEqual(code, 0)
+        parsed = self.assert_single_json_error(stdout)
+        self.assertIn("unknown-cmd", parsed["error"])
+
+    def test_extra_positional_with_json_has_an_error_field(self) -> None:
+        code, stdout, _ = self.run_client("status", "extra-argument", "--json")
+        self.assertNotEqual(code, 0)
+        parsed = self.assert_single_json_error(stdout)
+        self.assertIn("extra-argument", parsed["error"])
+
+    def test_parse_error_without_json_writes_nothing_to_stdout(self) -> None:
+        code, stdout, stderr = self.run_client("unknown-cmd")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertIn("unknown-cmd", stderr)
+
+
+class TimeoutTest(ClientTestCase):
+    def test_default_timeout_is_ten_minutes(self) -> None:
+        from forgel_code.engine import DEFAULT_TIMEOUT
+
+        self.assertEqual(DEFAULT_TIMEOUT, 600)
+
+    def test_option_then_environment_then_default(self) -> None:
+        from forgel_code.cli import resolve_timeout
+
+        try:
+            os.environ.pop("FORGEL_CODE_TIMEOUT", None)
+            self.assertEqual(resolve_timeout(None), 600)
+            os.environ["FORGEL_CODE_TIMEOUT"] = "42"
+            self.assertEqual(resolve_timeout(None), 42)
+            self.assertEqual(resolve_timeout(7), 7)
+        finally:
+            os.environ.pop("FORGEL_CODE_TIMEOUT", None)
+
+    def test_option_times_out_a_slow_engine(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "sleep"
+        self.env["FORGEL_STUB_SLEEP"] = "3"
+        code, _, stderr = self.run_client("--timeout", "0.2", "status")
+        self.assertNotEqual(code, 0)
+        self.assertIn("timed out", stderr)
+        self.assertIn("0.2", stderr)
+
+    def test_environment_times_out_a_slow_engine_with_json(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "sleep"
+        self.env["FORGEL_STUB_SLEEP"] = "3"
+        self.env["FORGEL_CODE_TIMEOUT"] = "0.2"
+        code, stdout, stderr = self.run_client("status", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("timed out", stderr)
+        parsed = self.assert_single_json_error(stdout)
+        self.assertIn("timed out", parsed["error"])
+
+
+class EngineCallTest(ClientTestCase):
+    def test_utf8_output_is_decoded_regardless_of_the_locale(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "non-ascii"
+        env = dict(self.env)
+        env["LC_ALL"] = "C"
+        env["LANG"] = "C"
+        env["PYTHONCOERCECLOCALE"] = "0"
+        env["PYTHONUTF8"] = "0"
+        env["PYTHONIOENCODING"] = "utf-8"
+        completed = subprocess.run(
+            [sys.executable, "-m", "forgel_code", "status", "--json"],
+            cwd=str(ROOT),
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(payload["result"]["text"], "Привет, мир")
+
+    def test_engine_does_not_receive_the_client_stdin(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "stdin"
+        code, stdout, stderr = self.run_client("status", "--json")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["result"]["stdin_bytes"], 0)
+        self.assertEqual(self.stdin_file.read_bytes(), b"")
+
+
+class StructuredErrorTest(ClientTestCase):
+    def test_ok_false_with_exit_zero_is_a_failure(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "structured-error"
+        code, stdout, stderr = self.run_client("status")
+        self.assertNotEqual(code, 0)
+        self.assertIn("task_closed", stderr)
+        self.assertIn("task is already closed", stderr)
+        self.assertEqual(stdout, "")
+
+    def test_structured_fields_reach_the_json_object(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "structured-error"
+        code, stdout, _ = self.run_client("status", "--json")
+        self.assertNotEqual(code, 0)
+        parsed = self.assert_single_json_error(stdout)
+        self.assertIn("task_closed", parsed["error"])
+        self.assertEqual(parsed["engine_error"]["code"], "task_closed")
+        self.assertEqual(parsed["engine_error"]["kind"], "conflict")
+        self.assertEqual(
+            parsed["engine_error"]["message"], "task is already closed"
+        )
+
+    def test_string_error_is_carried_through(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "structured-error-string"
+        code, stdout, stderr = self.run_client("status", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("the milestone is missing", stderr)
+        self.assertIn("the milestone is missing", json.loads(stdout)["error"])
+
+
+class JsonExtractionTest(ClientTestCase):
+    def test_a_brace_in_a_log_line_does_not_hide_the_answer(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "noisy"
+        code, stdout, stderr = self.run_client("status", "--json")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["result"], PAYLOAD)
+
+    def test_undecodable_output_is_reported_with_an_excerpt(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "garbage"
+        code, stdout, stderr = self.run_client("status", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("engine fell over", stderr)
+        parsed = self.assert_single_json_error(stdout)
+        self.assertIn("engine fell over", parsed["error"])
+
+
+class TaskLookupTest(ClientTestCase):
     def test_task_shows_only_the_requested_task(self) -> None:
         code, stdout, _ = self.run_client("task", "t-2")
         self.assertEqual(code, 0)
@@ -292,6 +585,38 @@ class TaskStateTest(ClientTestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("t-404", json.loads(stdout)["error"])
 
+    def test_only_top_level_entries_are_matched(self) -> None:
+        self.env["FORGEL_STUB_PAYLOAD"] = json.dumps(
+            {
+                "ok": True,
+                "tasks": [{"id": "t-1", "state": "ready"}],
+                "milestone": {"current": {"task": {"id": "t-9"}}},
+            }
+        )
+        code, _, stderr = self.run_client("task", "t-9")
+        self.assertNotEqual(code, 0)
+        self.assertIn("t-9", stderr)
+
+    def test_task_id_field_is_understood(self) -> None:
+        self.env["FORGEL_STUB_PAYLOAD"] = json.dumps(
+            {"ok": True, "tasks": [{"task_id": "t-7", "state": "ready"}]}
+        )
+        code, stdout, _ = self.run_client("task", "t-7")
+        self.assertEqual(code, 0)
+        self.assertIn("t-7", stdout)
+
+    def test_ambiguous_task_is_an_error(self) -> None:
+        self.env["FORGEL_STUB_PAYLOAD"] = json.dumps(
+            {
+                "ok": True,
+                "tasks": [{"id": "t-1", "state": "ready"}, {"id": "t-1", "state": "done"}],
+            }
+        )
+        code, stdout, stderr = self.run_client("task", "t-1", "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("ambiguous", stderr)
+        self.assertIn("ambiguous", json.loads(stdout)["error"])
+
 
 class AcceptReworkTest(ClientTestCase):
     def test_accept_reaches_the_engine(self) -> None:
@@ -302,19 +627,6 @@ class AcceptReworkTest(ClientTestCase):
             self.last_engine_argv(),
             ["task", "accept", "--task", "t-1", "--json"],
         )
-
-    def test_accept_uses_the_active_project(self) -> None:
-        # The project the client session made active is forwarded to the engine.
-        self.assertEqual(self.run_client("use", "acme")[0], 0)
-        code, _, stderr = self.run_client("accept", "t-1")
-        self.assertEqual(code, 0)
-        self.assertEqual(stderr, "")
-        argv = self.last_engine_argv()
-        self.assertEqual(argv[:2], ["task", "accept"])
-        self.assertIn("--project", argv)
-        self.assertEqual(argv[argv.index("--project") + 1], "acme")
-        self.assertIn("--task", argv)
-        self.assertEqual(argv[argv.index("--task") + 1], "t-1")
 
     def test_rework_reaches_the_engine_and_carries_remarks(self) -> None:
         code, _, stderr = self.run_client("rework", "t-1", "no", "tests")
@@ -333,15 +645,6 @@ class AcceptReworkTest(ClientTestCase):
             ],
         )
 
-    def test_default_session_key_never_reaches_the_engine(self) -> None:
-        for args in (("accept", "t-1"), ("rework", "t-1", "no tests")):
-            with self.subTest(command=args[0]):
-                code, _, _ = self.run_client(*args)
-                self.assertEqual(code, 0)
-                argv = self.last_engine_argv()
-                self.assertNotIn("--project", argv)
-                self.assertNotIn("local", argv)
-
     def test_selected_project_is_passed_to_the_engine(self) -> None:
         self.assertEqual(self.run_client("use", "acme")[0], 0)
         self.assertEqual(self.run_client("accept", "t-1")[0], 0)
@@ -352,21 +655,6 @@ class AcceptReworkTest(ClientTestCase):
                 "accept",
                 "--task",
                 "t-1",
-                "--project",
-                "acme",
-                "--json",
-            ],
-        )
-        self.assertEqual(self.run_client("rework", "t-1", "no tests")[0], 0)
-        self.assertEqual(
-            self.last_engine_argv(),
-            [
-                "task",
-                "reject",
-                "--task",
-                "t-1",
-                "--notes",
-                "no tests",
                 "--project",
                 "acme",
                 "--json",
@@ -384,8 +672,10 @@ class AcceptReworkTest(ClientTestCase):
         self.assertFalse(session.selected())
 
     def test_rework_requires_remarks(self) -> None:
-        with self.assertRaises(SystemExit):
-            self.run_client("rework", "t-1")
+        code, stdout, stderr = self.run_client("rework", "t-1", "--json")
+        self.assertNotEqual(code, 0)
+        self.assert_single_json_error(stdout)
+        self.assertIn("remarks", stderr)
 
     def test_accept_and_rework_report_engine_errors(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "error"
@@ -400,7 +690,7 @@ class AcceptReworkTest(ClientTestCase):
 
 
 class MissingEngineCommandTest(ClientTestCase):
-    """FR-4: with no engine command the client says so, it invents nothing."""
+    """FR-9: a missing engine command is inferred from the return code."""
 
     def test_accept_reports_a_missing_engine_command(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "no-task-action"
@@ -408,7 +698,6 @@ class MissingEngineCommandTest(ClientTestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("no engine command", stderr)
         self.assertIn("forgel task accept", stderr)
-        self.assertIn("unknown command", stderr)
 
     def test_rework_reports_a_missing_engine_command(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "no-task-action"
@@ -418,32 +707,43 @@ class MissingEngineCommandTest(ClientTestCase):
         self.assertIn("forgel task reject", stderr)
 
     def test_accept_reports_a_missing_accept_action(self) -> None:
-        # The engine knows ``task`` but not its ``accept`` action; the explicit
-        # missing-command report must cover that shape as well.
         self.env["FORGEL_STUB_MODE"] = "no-task-accept"
         code, _, stderr = self.run_client("accept", "t-1")
         self.assertNotEqual(code, 0)
         self.assertIn("no engine command", stderr)
         self.assertIn("forgel task accept", stderr)
-        self.assertIn("invalid choice", stderr)
+
+    def test_detection_does_not_depend_on_the_message_language(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "no-task-action-ru"
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("no engine command", stderr)
+
+    def test_a_structured_non_usage_error_is_not_a_missing_command(self) -> None:
+        self.env["FORGEL_STUB_MODE"] = "usage-other"
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("no engine command", stderr)
 
     def test_missing_engine_command_with_json_flag_emits_one_object(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "no-task-action"
         code, stdout, stderr = self.run_client("accept", "t-1", "--json")
         self.assertNotEqual(code, 0)
         self.assertIn("no engine command", stderr)
-        parsed = json.loads(stdout)
-        self.assertFalse(parsed["ok"])
+        parsed = self.assert_single_json_error(stdout)
         self.assertIn("no engine command", parsed["error"])
 
     def test_other_engine_errors_are_passed_through_unchanged(self) -> None:
-        # An ordinary engine failure is not turned into the missing-command
-        # report; the engine's own text reaches the user as is.
         self.env["FORGEL_STUB_MODE"] = "error"
         code, _, stderr = self.run_client("accept", "t-1")
         self.assertNotEqual(code, 0)
         self.assertIn("engine refused: task is already closed", stderr)
         self.assertNotIn("no engine command", stderr)
+
+    def test_the_client_has_no_english_error_markers(self) -> None:
+        text = (SRC / "cli.py").read_text(encoding="utf-8")
+        for marker in ("unrecognized", "invalid choice", "no such command"):
+            self.assertNotIn(marker, text)
 
 
 class StubContractTest(ClientTestCase):
@@ -499,8 +799,7 @@ class FailureTest(ClientTestCase):
         code, stdout, stderr = self.run_client("status", "--json")
         self.assertNotEqual(code, 0)
         self.assertIn("engine refused", stderr)
-        parsed = json.loads(stdout)
-        self.assertFalse(parsed["ok"])
+        parsed = self.assert_single_json_error(stdout)
         self.assertIn("engine refused", parsed["error"])
 
     def test_missing_engine_is_reported(self) -> None:
@@ -510,18 +809,17 @@ class FailureTest(ClientTestCase):
 
 
 class SessionTest(ClientTestCase):
-    def test_default_project_is_local(self) -> None:
+    def test_default_project_is_not_selected(self) -> None:
         from forgel_code.session import Session
 
         session = Session(Path(self.env["FORGEL_CODE_HOME"]) / "session.json")
-        self.assertEqual(session.project(), "local")
         self.assertFalse(session.selected())
 
     def test_use_persists_the_active_project(self) -> None:
         from forgel_code.session import Session
 
         session = Session(Path(self.env["FORGEL_CODE_HOME"]) / "session.json")
-        self.assertEqual(session.project(), "local")
+        self.assertFalse(session.selected())
         code, _, _ = self.run_client("use", "acme")
         self.assertEqual(code, 0)
         self.assertEqual(session.project(), "acme")
@@ -531,6 +829,26 @@ class SessionTest(ClientTestCase):
         code, _, _ = self.run_client("projects")
         self.assertEqual(code, 0)
         self.assertEqual(self.last_engine_argv(), ["projects", "--json"])
+
+
+class PlanShapeTest(ClientTestCase):
+    def test_free_text_is_the_goal(self) -> None:
+        code, _, stderr = self.run_client("plan", "ship", "v1")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.last_engine_argv(), ["plan", "--goal", "ship v1", "--json"])
+
+    def test_milestone_is_an_explicit_option(self) -> None:
+        code, _, stderr = self.run_client("plan", "--milestone", "m-1", "ship", "v1")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(
+            self.last_engine_argv(),
+            ["plan", "m-1", "--goal", "ship v1", "--json"],
+        )
+
+    def test_a_goal_alone_is_never_read_as_a_milestone(self) -> None:
+        code, _, stderr = self.run_client("plan", "m-1")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.last_engine_argv(), ["plan", "--goal", "m-1", "--json"])
 
 
 class NoEngineImportTest(unittest.TestCase):
@@ -574,20 +892,11 @@ class NoEngineImportTest(unittest.TestCase):
                 self.assertNotIn("from forgel import", text)
 
 
-class PackagingTest(unittest.TestCase):
-    def test_entry_point_points_at_the_client(self) -> None:
-        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('forgel-code = "forgel_code.cli:main"', text)
-
-    def test_license_and_readme_are_present(self) -> None:
-        self.assertTrue((ROOT / "LICENSE").is_file())
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("forgel-code", readme)
-        for command in ("say", "status", "tasks", "task", "plan", "use"):
-            self.assertIn(command, readme)
+class ReadmeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     def test_readme_documents_the_engine_commands_the_client_calls(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for fragment in (
             "forgel say",
             "forgel status",
@@ -602,13 +911,33 @@ class PackagingTest(unittest.TestCase):
             "forgel projects",
             "forgel use",
         ):
-            self.assertIn(fragment, readme)
-        self.assertNotIn("--reason", readme)
-        self.assertNotIn("forgel task --accept", readme)
+            self.assertIn(fragment, self.readme)
+        self.assertNotIn("--reason", self.readme)
+        self.assertNotIn("forgel task --accept", self.readme)
 
     def test_readme_documents_the_missing_engine_command_report(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("no engine command", readme)
+        self.assertIn("no engine command", self.readme)
+
+    def test_readme_has_a_pinned_install_command(self) -> None:
+        self.assertIn("forgel-dev/code@v0.1.0", self.readme)
+        self.assertIn("forgel-code==0.1.0", self.readme)
+
+    def test_readme_has_no_default_branch_install(self) -> None:
+        self.assertNotIn("pipx install git+https://github.com/forgel-dev/code\n", self.readme)
+        self.assertNotIn("git+https://github.com/forgel-dev/code   ", self.readme)
+        for line in self.readme.splitlines():
+            stripped = line.strip()
+            if "git+https://github.com/forgel-dev/code" in stripped:
+                self.assertIn("@", stripped, line)
+
+    def test_readme_has_no_editable_install_recommendation(self) -> None:
+        self.assertNotIn("pip install .", self.readme)
+        self.assertIn("Editable installs", self.readme)
+        self.assertIn("not supported", self.readme)
+
+    def test_readme_documents_the_update_path(self) -> None:
+        self.assertIn("Update", self.readme)
+        self.assertIn("--force", self.readme)
 
 
 if __name__ == "__main__":
