@@ -20,8 +20,11 @@ sys.path.insert(0, str(ROOT))
 # The stub mirrors the shape of the real engine's ``task`` and ``use``
 # subparsers: it only knows the flags the engine really has, so a client that
 # invents ``--reason`` (or any other unknown option) fails here like it fails
-# against the engine. ``FORGEL_STUB_MODE=no-task-action`` models an engine that
-# has no ``task`` action at all.
+# against the engine.
+#
+# ``FORGEL_STUB_MODE`` models engines the client must report honestly about:
+#   * ``no-task-action`` — no ``task`` command at all;
+#   * ``no-task-accept`` — ``task`` exists but has no ``--accept`` option.
 STUB_ENGINE = textwrap.dedent(
     """\
     import json
@@ -54,14 +57,13 @@ STUB_ENGINE = textwrap.dedent(
         "--test-command",
     }
     if argv[:1] == ["task"]:
-        action = argv[1] if len(argv) > 1 else ""
-        if action not in {"accept", "reject"}:
-            sys.stderr.write("engine: unknown task action %r\\n" % action)
-            sys.exit(2)
-        for token in argv[2:]:
+        for token in argv[1:]:
             if token.startswith("--") and token not in task_flags:
                 sys.stderr.write("engine: unrecognized argument %s\\n" % token)
                 sys.exit(2)
+        if mode == "no-task-accept" and "--accept" in argv:
+            sys.stderr.write("engine: unrecognized argument --accept\\n")
+            sys.exit(2)
     if argv[:1] == ["use"] and len(argv) < 2:
         sys.stderr.write("engine: use needs a project key\\n")
         sys.exit(2)
@@ -175,12 +177,11 @@ class CommandTest(ClientTestCase):
         (("status",), ["status"]),
         (("tasks",), ["tasks"]),
         (("task", "t-1"), ["tasks"]),
-        (("accept", "t-1"), ["task", "accept", "--task", "t-1"]),
+        (("accept", "t-1"), ["task", "--accept", "--task", "t-1"]),
         (
             ("rework", "t-1", "the", "button", "is", "dead"),
             [
                 "task",
-                "reject",
                 "--task",
                 "t-1",
                 "--notes",
@@ -262,7 +263,7 @@ class AcceptReworkTest(ClientTestCase):
         self.assertEqual(stderr, "")
         self.assertEqual(
             self.last_engine_argv(),
-            ["task", "accept", "--task", "t-1", "--json"],
+            ["task", "--accept", "--task", "t-1", "--json"],
         )
 
     def test_accept_uses_the_active_project(self) -> None:
@@ -272,7 +273,8 @@ class AcceptReworkTest(ClientTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         argv = self.last_engine_argv()
-        self.assertEqual(argv[:2], ["task", "accept"])
+        self.assertEqual(argv[0], "task")
+        self.assertIn("--accept", argv)
         self.assertIn("--project", argv)
         self.assertEqual(argv[argv.index("--project") + 1], "acme")
         self.assertIn("--task", argv)
@@ -286,7 +288,6 @@ class AcceptReworkTest(ClientTestCase):
             self.last_engine_argv(),
             [
                 "task",
-                "reject",
                 "--task",
                 "t-1",
                 "--notes",
@@ -309,14 +310,13 @@ class AcceptReworkTest(ClientTestCase):
         self.assertEqual(self.run_client("accept", "t-1")[0], 0)
         self.assertEqual(
             self.last_engine_argv(),
-            ["task", "accept", "--project", "acme", "--task", "t-1", "--json"],
+            ["task", "--accept", "--project", "acme", "--task", "t-1", "--json"],
         )
         self.assertEqual(self.run_client("rework", "t-1", "no tests")[0], 0)
         self.assertEqual(
             self.last_engine_argv(),
             [
                 "task",
-                "reject",
                 "--project",
                 "acme",
                 "--task",
@@ -361,7 +361,7 @@ class MissingEngineCommandTest(ClientTestCase):
         code, _, stderr = self.run_client("accept", "t-1")
         self.assertNotEqual(code, 0)
         self.assertIn("no engine command", stderr)
-        self.assertIn("forgel task accept", stderr)
+        self.assertIn("forgel task --accept", stderr)
         self.assertIn("unknown command", stderr)
 
     def test_rework_reports_a_missing_engine_command(self) -> None:
@@ -369,7 +369,17 @@ class MissingEngineCommandTest(ClientTestCase):
         code, _, stderr = self.run_client("rework", "t-1", "no tests")
         self.assertNotEqual(code, 0)
         self.assertIn("no engine command", stderr)
-        self.assertIn("forgel task reject", stderr)
+        self.assertIn("forgel task --notes", stderr)
+
+    def test_accept_reports_a_missing_accept_option(self) -> None:
+        # The engine knows ``task`` but not its ``--accept`` option; the
+        # explicit missing-command report must cover that shape as well.
+        self.env["FORGEL_STUB_MODE"] = "no-task-accept"
+        code, _, stderr = self.run_client("accept", "t-1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("no engine command", stderr)
+        self.assertIn("forgel task --accept", stderr)
+        self.assertIn("unrecognized argument --accept", stderr)
 
     def test_missing_engine_command_with_json_flag_emits_one_object(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "no-task-action"
@@ -419,7 +429,6 @@ class FailureTest(ClientTestCase):
             [
                 str(self.bin_dir / "forgel"),
                 "task",
-                "reject",
                 "--reason",
                 "x",
                 "--json",
@@ -515,8 +524,8 @@ class PackagingTest(unittest.TestCase):
             "forgel say",
             "forgel status",
             "forgel tasks",
-            "forgel task accept",
-            "forgel task reject",
+            "forgel task --accept",
+            "forgel task --task",
             "--notes",
             "forgel plan",
             "forgel resume",

@@ -37,11 +37,13 @@ COMMANDS = [
 # Keys the engine may use for the identifier of a task in its JSON answer.
 TASK_ID_KEYS = ("id", "task_id")
 
-# Client commands that lean on the engine's ``task`` action and the action name
-# they ask it for.
-TASK_ACTIONS = {"accept": "accept", "rework": "reject"}
+# Client commands that lean on the engine's ``task`` command and the option of
+# that command they need. ``accept`` and ``rework`` stay inside the engine's
+# documented command set (``task``) instead of inventing subcommands.
+TASK_ACTIONS = {"accept": "--accept", "rework": "--notes"}
 
-# Wording an engine uses when it does not provide the requested action at all.
+# Wording an engine uses when it does not provide the requested option or
+# command at all.
 UNKNOWN_ACTION_MARKERS = (
     "unknown",
     "unrecognized",
@@ -49,6 +51,7 @@ UNKNOWN_ACTION_MARKERS = (
     "invalid choice",
     "not a valid choice",
     "no such command",
+    "no such option",
 )
 
 
@@ -164,14 +167,16 @@ def engine_arguments(args: argparse.Namespace, project: Optional[str]) -> List[s
         # requested one out of that machine-readable answer.
         return ["tasks"]
     if command == "accept":
-        return with_project(["task", "accept"]) + ["--task", args.task_id]
+        # Accepting leans on the engine's ``task`` command and its ``--accept``
+        # option; the client adds no subcommand of its own.
+        return with_project(["task", "--accept"]) + ["--task", args.task_id]
     if command == "rework":
         # The engine's ``task`` parser carries the remarks of a rejection in
         # ``--notes``; it has no ``--reason`` option.
         remarks = " ".join(args.remarks).strip()
         if not remarks:
             raise ValueError("rework needs remarks")
-        return with_project(["task", "reject"]) + [
+        return with_project(["task"]) + [
             "--task",
             args.task_id,
             "--notes",
@@ -214,13 +219,13 @@ def select_task(payload: Any, task_id: str) -> Dict[str, Any]:
 def missing_engine_command(command: str, exc: EngineError) -> Optional[str]:
     """Return an explicit report when the engine lacks the action, else ``None``.
 
-    ``accept`` and ``rework`` lean on the engine's ``task`` action. When the
-    running engine does not provide that action it answers with an unknown
-    command error; the client then says so explicitly instead of inventing
-    behaviour the engine does not have.
+    ``accept`` and ``rework`` lean on the engine's ``task`` command. When the
+    running engine does not provide the option they need, it answers with an
+    unknown command/option error; the client then says so explicitly instead of
+    inventing behaviour the engine does not have.
     """
-    action = TASK_ACTIONS.get(command)
-    if action is None:
+    option = TASK_ACTIONS.get(command)
+    if option is None:
         return None
     text = exc.message.strip()
     lowered = text.lower()
@@ -228,7 +233,7 @@ def missing_engine_command(command: str, exc: EngineError) -> Optional[str]:
         return None
     return (
         "forgel-code %s: the engine reports no engine command for this action "
-        "(`forgel task %s` is not available: %s)" % (command, action, text)
+        "(`forgel task %s` is not available: %s)" % (command, option, text)
     )
 
 
