@@ -36,8 +36,8 @@ client passes no `--project` and the engine keeps its own active project.
 | `forgel-code status` | `forgel status` | State of the task and the milestone |
 | `forgel-code tasks` | `forgel tasks` | List tasks |
 | `forgel-code task <task>` | `forgel tasks` | State of one task, picked out of the engine's task list |
-| `forgel-code accept <task>` | `forgel task --accept [--project <key>] --task <task>` | Accept a task |
-| `forgel-code rework <task> <remark...>` | `forgel task [--project <key>] --task <task> --notes "<remark>"` | Send a task back for rework with remarks |
+| `forgel-code accept <task>` | `forgel task accept --task <task> [--project <key>]` | Accept a task |
+| `forgel-code rework <task> <remark...>` | `forgel task reject --task <task> --notes "<remark>" [--project <key>]` | Send a task back for rework with remarks |
 | `forgel-code resume` | `forgel resume` | Start or resume work |
 | `forgel-code pause` | `forgel pause` | Pause work |
 | `forgel-code plan <milestone> [goal...]` | `forgel plan <milestone> [--goal "<goal>"]` | Decompose the milestone goal into tasks |
@@ -50,16 +50,17 @@ client passes no `--project` and the engine keeps its own active project.
 its task list and shows the one task you named. If that task is not in the
 engine's answer, the client reports it and exits with a non-zero code.
 
-`accept` and `rework` lean on the engine's `task` command: `accept` asks for
-`--accept`, `rework` carries the remarks in `--notes`. The client adds no
-subcommand of its own. The exact engine calls behind them are:
+`accept` and `rework` lean on the engine's `task` command and its positional
+actions: accepting is `task accept`, sending back is `task reject`, and the
+remarks travel in the engine's `--notes`. The client adds no subcommand and no
+option of its own. The exact engine calls behind them are:
 
 ```sh
-forgel task --accept --task <task> --json
-forgel task --task <task> --notes "<remark>" --json
+forgel task accept --task <task> --json
+forgel task reject --task <task> --notes "<remark>" --json
 ```
 
-When the running engine does not provide the option a point needs, the client
+When the running engine does not provide the action a point needs, the client
 prints the engine's own message plus an explicit note ("no engine command for
 this point") and exits with a non-zero code instead of inventing behaviour.
 
