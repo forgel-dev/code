@@ -7,7 +7,6 @@ import importlib.util
 import io
 import os
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -50,7 +49,7 @@ def _load_backend(root: Path):
 
 
 def _clean_env() -> dict:
-    """An environment that cannot redirect ``python -m forgel_code`` elsewhere."""
+    """An environment that cannot redirect ``forgel_code`` elsewhere."""
     env = dict(os.environ)
     for name in (
         "FORGEL_ENGINE",
@@ -91,15 +90,21 @@ class TempProjectTest(unittest.TestCase):
         )
 
     def version_output(self) -> str:
-        completed = subprocess.run(
-            [sys.executable, "-m", "forgel_code", "--version"],
-            cwd=str(self.root),
-            env=_clean_env(),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        return completed.stdout.strip()
+        """``forgel-code --version`` from the package in this checkout."""
+        from forgel_code.cli import main
+
+        stdout = io.StringIO()
+        old_env = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(_clean_env())
+        try:
+            with contextlib.redirect_stdout(stdout):
+                code = main(["--version"])
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+        self.assertEqual(code, 0)
+        return stdout.getvalue().strip()
 
 
 class BuildBackendTest(TempProjectTest):
@@ -151,6 +156,27 @@ class BuildBackendTest(TempProjectTest):
         for member in names:
             self.assertTrue(member.startswith(root + "/"), member)
 
+    def test_sdist_and_wheel_contents(self) -> None:
+        """One check for both artefacts named in the acceptance criterion."""
+        self.write_package_extra()
+
+        wheel_name = self.backend.build_wheel(str(self.out))
+        sdist_name = self.backend.build_sdist(str(self.out))
+
+        self.assertEqual(sdist_name, "forgel_code-%s.tar.gz" % VERSION)
+        root = "forgel_code-%s" % VERSION
+        with tarfile.open(self.out / sdist_name) as archive:
+            sdist_names = set(archive.getnames())
+        self.assertIn("%s/PKG-INFO" % root, sdist_names)
+        self.assertIn("%s/forgel_code/extra/mod.py" % root, sdist_names)
+        self.assertIn("%s/forgel_code/data.txt" % root, sdist_names)
+
+        with zipfile.ZipFile(self.out / wheel_name) as archive:
+            wheel_names = set(archive.namelist())
+        self.assertIn("forgel_code/extra/mod.py", wheel_names)
+        self.assertIn("forgel_code/extra/schema.json", wheel_names)
+        self.assertIn("forgel_code/data.txt", wheel_names)
+
     def test_sdist_pkg_info_names_the_version(self) -> None:
         name = self.backend.build_sdist(str(self.out))
         with tarfile.open(self.out / name) as archive:
@@ -187,13 +213,7 @@ class VersionSourceTest(TempProjectTest):
         self.assertEqual(self.version_output(), "forgel-code %s" % VERSION)
 
     def test_version_option_matches_built_metadata(self) -> None:
-        from forgel_code.cli import main
-
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            code = main(["--version"])
-        self.assertEqual(code, 0)
-        printed = stdout.getvalue().strip()
+        printed = self.version_output()
         self.assertEqual(printed, "forgel-code %s" % VERSION)
         self.assertIn("Version: %s" % printed.split()[-1], self.backend._metadata())
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -215,8 +216,20 @@ COMMAND_CASES = [
 
 
 def _write_stub(directory: Path) -> Path:
+    """Write a launcher that starts the stub with this test interpreter.
+
+    The interpreter is reached through a POSIX shell, so a Python installed
+    under a path with spaces still works and the stub does not depend on a
+    ``#!`` line the kernel could truncate.
+    """
     stub = directory / "forgel"
-    stub.write_text("#!%s\n%s" % (sys.executable, STUB_ENGINE), encoding="utf-8")
+    script = directory / "forgel_stub.py"
+    script.write_text(STUB_ENGINE, encoding="utf-8")
+    stub.write_text(
+        '#!/bin/sh\nexec %s %s "$@"\n'
+        % (shlex.quote(sys.executable), shlex.quote(str(script))),
+        encoding="utf-8",
+    )
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return stub
 
@@ -479,7 +492,7 @@ class TimeoutTest(ClientTestCase):
 
     def test_option_times_out_a_slow_engine(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "sleep"
-        self.env["FORGEL_STUB_SLEEP"] = "3"
+        self.env["FORGEL_STUB_SLEEP"] = "1.5"
         code, _, stderr = self.run_client("--timeout", "0.2", "status")
         self.assertNotEqual(code, 0)
         self.assertIn("timed out", stderr)
@@ -487,7 +500,7 @@ class TimeoutTest(ClientTestCase):
 
     def test_environment_times_out_a_slow_engine_with_json(self) -> None:
         self.env["FORGEL_STUB_MODE"] = "sleep"
-        self.env["FORGEL_STUB_SLEEP"] = "3"
+        self.env["FORGEL_STUB_SLEEP"] = "1.5"
         self.env["FORGEL_CODE_TIMEOUT"] = "0.2"
         code, stdout, stderr = self.run_client("status", "--json")
         self.assertNotEqual(code, 0)
