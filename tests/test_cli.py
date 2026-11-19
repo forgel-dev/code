@@ -347,6 +347,52 @@ class HelpTest(unittest.TestCase):
         self.assertEqual(lines.count('"--timeout",'), 1, text)
 
 
+class CliSmokeTests(unittest.TestCase):
+    """``forgel-code --help`` and ``forgel-code --version`` exit 0."""
+
+    def run_main(self, *args: str):
+        import contextlib
+        import io
+
+        from forgel_code.cli import main
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = main(list(args))
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_help_exits_zero_and_lists_the_commands(self) -> None:
+        code, stdout, stderr = self.run_main("--help")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        for command in ("say", "status", "plan", "use"):
+            self.assertIn(command, stdout)
+
+    def test_command_help_exits_zero(self) -> None:
+        code, stdout, stderr = self.run_main("plan", "--help")
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("--milestone", stdout)
+
+    def test_version_exits_zero_and_prints_the_client_version(self) -> None:
+        from forgel_code import __version__
+
+        code, stdout, stderr = self.run_main("--version")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stdout.strip(), "forgel-code %s" % __version__)
+
+    def test_help_and_version_exit_zero_as_processes(self) -> None:
+        for argv in (["--help"], ["--version"]):
+            with self.subTest(argv=argv):
+                completed = subprocess.run(
+                    [sys.executable, "-m", "forgel_code", *argv],
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertTrue(completed.stdout.strip())
+
+
 class CommandTest(ClientTestCase):
     CASES = COMMAND_CASES
 
