@@ -11,96 +11,59 @@ project files and never runs checks itself.
 
 ## Install
 
-Forgel Code installs with the pip bundled with Python 3 — no extra tool is
-needed. Install a pinned revision — a tag, a commit hash or an exact version —
-never the moving default branch. The first command block is the plain pip
-install into a virtual environment:
+Forgel Code installs with one command. It needs Python 3.9 or newer with the
+`pip` module it ships, and the `forgel` engine on `PATH`.
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-python3 -m pip install "git+https://github.com/forgel-dev/code@v0.1.0"
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh | sh
 ```
 
-### System Python without a virtual environment
+The installer puts the client into `~/.local/share/forgel-code` and a
+`forgel-code` launcher into `~/.local/bin`, then adds that directory to `PATH`
+through one marked block in your shell profile — `~/.zshrc` for zsh,
+`~/.bashrc` (or `~/.bash_profile`) for bash, `~/.profile` otherwise. No virtual
+environment and no activation step are involved, and the same command run again
+replaces the installation instead of duplicating anything.
 
-`--user` installs under your home directory, so neither root access nor a
-virtual environment is required:
+The client has no dependencies and builds through the small in-tree PEP 517
+backend (`_build_backend.py`), so the installer never needs a package index.
+Editable installs are not supported: the backend implements only the
+`build_wheel` and `build_sdist` hooks.
+
+### Options
+
+| Variable | Effect |
+| --- | --- |
+| `FORGEL_CODE_HOME` | installation prefix (default `~/.local/share/forgel-code`) |
+| `FORGEL_CODE_BIN` | directory of the `forgel-code` launcher (default `~/.local/bin`) |
+| `FORGEL_CODE_PROFILE` | shell profile that receives the `PATH` block |
+| `FORGEL_CODE_NO_MODIFY_PATH` | set it to leave the shell profile untouched |
+| `FORGEL_CODE_SOURCE` | install from a local checkout instead of the network |
+
+With `FORGEL_CODE_NO_MODIFY_PATH=1` no profile is opened for writing; the
+installer prints the exact `export PATH=...` line to add yourself.
 
 ```sh
-python3 -m pip install --user "git+https://github.com/forgel-dev/code@v0.1.0"
+FORGEL_CODE_SOURCE=/path/to/code sh install.sh
 ```
 
-Once a release is published on a package index, the exact version pins the
-same revision:
-
-```sh
-python3 -m pip install "forgel-code==0.1.0"
-```
-
-### Where `forgel-code` lands and how to reach it
-
-pip writes the `forgel-code` executable into the `bin` directory of the
-environment it installed into — `.venv/bin/forgel-code` after the activation
-above, or `.venv\Scripts\forgel-code.exe` on Windows. A `--user` install uses
-pip's user scripts directory instead: `~/.local/bin` on Linux and macOS,
-`%APPDATA%\Python\Python3x\Scripts` on Windows.
-
-Activating the virtual environment already puts `.venv/bin` on `PATH`. If
-`forgel-code` is not found, locate the scripts directory and add it to `PATH`:
-
-```sh
-python3 -m site --user-base         # the user scripts live in <that>/bin
-python3 -m pip show -f forgel-code  # files and location of the install
-export PATH="$HOME/.local/bin:$PATH"   # Windows: setx PATH "%APPDATA%\Python\Python3x\Scripts;%PATH%"
-```
-
-With the scripts directory on `PATH`, `forgel-code --version` prints the
-installed version.
-
-### Fallback: run the module
-
-A `PATH` that does not include the scripts directory is not fatal — the
-interpreter the package was installed into can run it as a module:
-
-```sh
-python3 -m forgel_code --version
-```
-
-Use the interpreter that owns the install: `.venv/bin/python3` with the virtual
-environment active, or the system `python3` after a `--user` install.
-
-The build has no dependencies: the repository ships a small in-tree PEP 517
-backend (`_build_backend.py`), so the install works offline and does not need
-setuptools or a package index. The engine (`forgel`) must be available on
-`PATH`; use `--engine PATH` or `$FORGEL_ENGINE` to point at a specific binary.
-
-Editable installs (`pip install -e`) are not supported: the in-tree backend
-implements only the `build_wheel` and `build_sdist` PEP 517 hooks.
-
-`pipx`, an optional alternative for isolation only, can install the same pinned
-revision (`git+https://github.com/forgel-dev/code@v0.1.0`) instead — plain pip
-above stays the primary path.
+The `forgel` engine must be available on `PATH`; use `--engine PATH` or
+`$FORGEL_ENGINE` to point at a specific binary. `forgel-code --version` prints
+the installed version.
 
 ### Update
 
-Updating means installing a newer pinned revision over the old one;
-`--upgrade` moves to that version:
-
 ```sh
-python3 -m pip install --upgrade "git+https://github.com/forgel-dev/code@v0.1.1"
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh
 ```
 
-When the version number is unchanged and only the commit moved, pip can treat
-the pinned requirement as already satisfied and keep the old code. Force the
-reinstall of that exact commit:
+### Uninstall
 
 ```sh
-python3 -m pip install --upgrade --force-reinstall "git+https://github.com/forgel-dev/code@<commit-sha>"
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh | sh -s -- --uninstall
 ```
 
-`forgel-code --version` prints the version that is actually installed, and
-`python3 -m forgel_code --version` does the same when `PATH` does not help.
+Windows is not the main installation method; the fallback there is `python -m pip install --user` of the pinned revision.
 
 ## Commands
 

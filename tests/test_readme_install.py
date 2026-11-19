@@ -1,4 +1,4 @@
-"""Documentation test: README.md leads with plain pip, pipx is optional and late."""
+"""Documentation guard: README.md documents exactly one one-command install path."""
 
 from __future__ import annotations
 
@@ -9,18 +9,43 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 
+# The command the README must lead with, character for character.
+INSTALL_COMMAND = (
+    "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh"
+    " | sh"
+)
+INSTALL_TAG = "v0.1.0"
+
 HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.*\S)\s*$")
 FENCE_RE = re.compile(r"^\s*```")
-# A pip install run through the interpreter: no pipx, no bare ``pip`` script.
-PLAIN_PIP_PREFIXES = ("python3 -m pip install", "python -m pip install")
-VCS_PIN_RE = re.compile(r"@(?P<ref>[^\s\"'#]+)")
-EXACT_VERSION_RE = re.compile(r"==(?P<version>[0-9][^\s\"'#]*)")
-# A ref that names a moving branch is not a pinned revision.
-BRANCH_REFS = frozenset({"head", "main", "master", "trunk", "develop", "default"})
+# Anything that names another installation path for the client.
+MAIN_PATH_TOKENS = (
+    "pip install",
+    "pip3 install",
+    "python -m venv",
+    "python3 -m venv",
+    "pipx",
+    "--user",
+)
+# The same alternatives anywhere in the file, Windows line excepted.
+FORBIDDEN_TOKENS = ("pipx", "python -m venv", "python3 -m venv")
+PIPELINE_RE = re.compile(
+    r"curl\b[^\n]*?"
+    r"raw\.githubusercontent\.com/forgel-dev/code/"
+    r"(?P<tag>v[0-9][^\s/]*)/install\.sh\b[^\n]*?\|\s*sh\b"
+)
 
 
 def _read_lines():
     return README.read_text(encoding="utf-8").splitlines()
+
+
+def _windows_lines(lines):
+    return [
+        position
+        for position, line in enumerate(lines)
+        if "windows" in line.lower()
+    ]
 
 
 def _headings(lines):
@@ -39,8 +64,8 @@ def _headings(lines):
     return found
 
 
-def _section_lines(lines, title):
-    """The body lines of the first section whose heading reads ``title``."""
+def _section_range(lines, title):
+    """``(start, end)`` line indices of the section whose heading reads ``title``."""
     headings = _headings(lines)
     for position, (index, level, heading) in enumerate(headings):
         if heading.strip().lower() != title:
@@ -50,8 +75,14 @@ def _section_lines(lines, title):
             if next_level <= level:
                 end = next_index
                 break
-        return lines[index + 1:end]
+        return index + 1, end
     raise AssertionError("README.md has no section titled %r" % title)
+
+
+def _section_lines(lines, title):
+    """The body lines of the section whose heading reads ``title``."""
+    start, end = _section_range(lines, title)
+    return lines[start:end]
 
 
 def _code_blocks(lines):
@@ -84,239 +115,313 @@ def _commands(block):
     ]
 
 
-def _install_commands(commands):
+def _section_commands(lines, title):
     return [
         command
-        for command in commands
-        if "pip install" in command or "pipx install" in command
+        for _, block in _code_blocks(_section_lines(lines, title))
+        for command in _commands(block)
     ]
 
 
-def _is_plain_pip(command):
-    return command.startswith(PLAIN_PIP_PREFIXES)
-
-
-def _is_pinned(command):
-    """True when the command names an exact revision, not a moving branch."""
-    for match in VCS_PIN_RE.finditer(command):
-        if match.group("ref").strip().lower() not in BRANCH_REFS:
-            return True
-    return bool(EXACT_VERSION_RE.search(command))
-
-
-def _assert_first_install_is_plain_pip(lines):
-    """The first install command of the install section must be plain pip."""
-    install = _section_lines(lines, "install")
-    blocks = [block for _, block in _code_blocks(install)]
+def assert_installer_command_is_first(lines):
+    """The first installation command is the one-line installer, nothing before it."""
+    section = _section_lines(lines, "install")
+    blocks = _code_blocks(section)
     if not blocks:
         raise AssertionError("the install section shows no command block")
-    commands = _commands(blocks[0])
-    installs = _install_commands(commands)
-    if not installs:
+    commands = _commands(blocks[0][1])
+    if not commands:
+        raise AssertionError("the first command block of the install section is empty")
+    if commands[0] != INSTALL_COMMAND:
         raise AssertionError(
-            "the first command block of the install section has no pip install command"
+            "the first installation command is not the one-command installer: %r"
+            % commands[0]
         )
-    if not _is_plain_pip(installs[0]):
-        raise AssertionError(
-            "the first install command is not plain pip: %s" % installs[0]
-        )
-    for command in commands:
-        if "pipx" in command:
-            raise AssertionError(
-                "the first command block needs pipx: %s" % command
-            )
-    return installs[0]
-
-
-def _assert_pipx_is_optional_and_late(lines):
-    """pipx is at most one line, marked optional, after the pip instructions."""
-    lowered = [line.lower() for line in lines]
-    total = sum(line.count("pipx") for line in lowered)
-    if total == 0:
-        return
-    mentions = [index for index, line in enumerate(lowered) if "pipx" in line]
-    if total > 1:
-        raise AssertionError("pipx is mentioned %d times; at most one is allowed" % total)
-    if len(mentions) != 1:
-        raise AssertionError("pipx is not on a single line")
-    index = mentions[0]
-    if "optional" not in lowered[index]:
-        raise AssertionError("the pipx line is not marked optional: %s" % lines[index])
-    pip_lines = [
+    index = next(
         position
-        for position, line in enumerate(lowered)
-        if _is_plain_pip(line.strip())
+        for position, line in enumerate(section)
+        if line.strip() == INSTALL_COMMAND
+    )
+    for position, line in enumerate(section[:index]):
+        lowered = line.lower()
+        for token in MAIN_PATH_TOKENS:
+            if token in lowered:
+                raise AssertionError(
+                    "the install section offers %r before the one-command "
+                    "installer on line %d: %s" % (token, position + 1, line)
+                )
+    return INSTALL_COMMAND
+
+
+def assert_no_alternative_main_path(lines):
+    """Only the one-command installer is a main path; the Windows line is marked."""
+    windows = set(_windows_lines(lines))
+    start, end = _section_range(lines, "install")
+    for position in range(start, end):
+        if position in windows:
+            continue
+        lowered = lines[position].lower()
+        for token in MAIN_PATH_TOKENS:
+            if token in lowered:
+                raise AssertionError(
+                    "the install section names another installation path (%r): %s"
+                    % (token, lines[position])
+                )
+    for position, line in enumerate(lines):
+        if position in windows:
+            continue
+        lowered = line.lower()
+        if "pip install" in lowered or "--user" in lowered:
+            raise AssertionError(
+                "a pip install line sits on the main path: %s" % line
+            )
+        for token in FORBIDDEN_TOKENS:
+            if token in lowered:
+                raise AssertionError(
+                    "README.md names another installation path (%r): %s"
+                    % (token, line)
+                )
+
+
+def assert_prerequisites(lines):
+    """Python 3 and the engine on PATH, with the custom engine path, are stated."""
+    text = "\n".join(_section_lines(lines, "install"))
+    lowered = text.lower()
+    if "python 3" not in lowered:
+        raise AssertionError(
+            "the install section does not state the Python 3 requirement"
+        )
+    if "forgel" not in lowered or "engine" not in lowered:
+        raise AssertionError(
+            "the install section does not state the forgel engine requirement"
+        )
+    if "path" not in lowered:
+        raise AssertionError("the install section does not put the engine on PATH")
+    if "--engine" not in text or "$FORGEL_ENGINE" not in text:
+        raise AssertionError(
+            "the install section does not say how to point at a custom engine path"
+        )
+
+
+def assert_single_update_and_uninstall(lines):
+    """Exactly one update line and exactly one uninstall line, same command."""
+    installs = []
+    updates = []
+    uninstalls = []
+    for line in lines:
+        if "install.sh" not in line:
+            continue
+        if "--uninstall" in line:
+            uninstalls.append(line.strip())
+            continue
+        match = PIPELINE_RE.search(line)
+        if not match:
+            continue
+        if match.group("tag") == INSTALL_TAG:
+            installs.append(line.strip())
+        else:
+            updates.append(line.strip())
+    if installs != [INSTALL_COMMAND]:
+        raise AssertionError(
+            "expected exactly one installation command, found %r" % (installs,)
+        )
+    if len(updates) != 1:
+        raise AssertionError(
+            "expected exactly one update line, found %d: %r"
+            % (len(updates), updates)
+        )
+    if len(uninstalls) != 1:
+        raise AssertionError(
+            "expected exactly one uninstall line, found %d: %r"
+            % (len(uninstalls), uninstalls)
+        )
+    for command in (updates[0], uninstalls[0]):
+        if "| sh" not in command:
+            raise AssertionError(
+                "the update or uninstall line is not the same command: %s" % command
+            )
+    return updates[0], uninstalls[0]
+
+
+def assert_single_windows_line(lines):
+    """One short Windows line, outside the main path, using ``pip install --user``."""
+    windows = _windows_lines(lines)
+    if len(windows) != 1:
+        raise AssertionError(
+            "expected exactly one Windows line, found %d: %r"
+            % (len(windows), [lines[position] for position in windows])
+        )
+    position = windows[0]
+    line = lines[position]
+    lowered = line.lower()
+    installer_positions = [
+        index
+        for index, candidate in enumerate(lines)
+        if candidate.strip() == INSTALL_COMMAND
     ]
-    if not pip_lines:
-        raise AssertionError("README.md documents no plain pip install command")
-    if index < min(pip_lines):
-        raise AssertionError("pipx appears before the pip installation instructions")
+    if not installer_positions:
+        raise AssertionError("README.md does not show the installation command")
+    if position < installer_positions[0]:
+        raise AssertionError("the Windows line preempts the main installation path")
+    if "pip install --user" not in lowered:
+        raise AssertionError(
+            "the Windows line does not use pip install --user: %s" % line
+        )
+    if "not the main" not in lowered and "fallback" not in lowered:
+        raise AssertionError(
+            "the Windows line is not marked as outside the main path: %s" % line
+        )
 
 
-class InstallSectionTest(unittest.TestCase):
-    """The install section, read structurally: headings plus fenced blocks."""
+class ReadmeInstallTest(unittest.TestCase):
+    """The README's installation section, read structurally."""
 
     def setUp(self) -> None:
         self.lines = _read_lines()
-        self.install = _section_lines(self.lines, "install")
-        self.text = "\n".join(self.install)
 
-    def test_first_install_command_is_plain_pip(self) -> None:
-        command = _assert_first_install_is_plain_pip(self.lines)
-        self.assertTrue(_is_plain_pip(command), command)
-
-    def test_first_install_command_is_pinned(self) -> None:
-        command = _assert_first_install_is_plain_pip(self.lines)
-        self.assertTrue(_is_pinned(command), command)
-
-    def test_virtual_environment_install(self) -> None:
-        commands = [
-            command
-            for block in _code_blocks(self.install)
-            for command in _commands(block[1])
-        ]
-        self.assertTrue(
-            any(command.startswith("python3 -m venv") for command in commands),
-            commands,
-        )
-        self.assertTrue(
-            any("activate" in command for command in commands),
-            commands,
-        )
-        self.assertTrue(
-            any(_is_plain_pip(command) and "--user" not in command for command in commands),
-            commands,
+    def test_first_install_command_is_the_installer_line(self) -> None:
+        self.assertEqual(
+            assert_installer_command_is_first(self.lines), INSTALL_COMMAND
         )
 
-    def test_user_install(self) -> None:
-        commands = [
-            command
-            for block in _code_blocks(self.install)
-            for command in _commands(block[1])
-        ]
-        user_installs = [
-            command
-            for command in commands
-            if _is_plain_pip(command) and "--user" in command
-        ]
-        self.assertTrue(user_installs, commands)
-        self.assertIn("without a virtual environment", self.text.lower())
+    def test_no_alternative_main_path(self) -> None:
+        assert_no_alternative_main_path(self.lines)
 
-    def test_executable_location_and_path_help(self) -> None:
-        self.assertIn("bin/forgel-code", self.text)
-        self.assertIn("Scripts", self.text)
-        self.assertIn("~/.local/bin", self.text)
-        self.assertIn("PATH", self.text)
-        self.assertIn("export PATH=", self.text)
-        self.assertIn("pip show -f forgel-code", self.text)
+    def test_installer_line_is_inside_a_code_block(self) -> None:
+        self.assertIn(INSTALL_COMMAND, _section_commands(self.lines, "install"))
 
-    def test_module_fallback_with_version_check(self) -> None:
-        self.assertIn("python3 -m forgel_code --version", self.text)
-        self.assertIn("forgel-code --version", self.text)
+    def test_prerequisites_are_kept(self) -> None:
+        assert_prerequisites(self.lines)
 
-    def test_update_section_switches_pinned_revision(self) -> None:
-        update = "\n".join(_section_lines(self.lines, "update"))
-        lowered = update.lower()
-        self.assertIn("pip install --upgrade", update)
-        self.assertIn("--force-reinstall", update)
-        self.assertIn("unchanged", lowered)
-        self.assertIn("commit", lowered)
-        self.assertIn("version", lowered)
-        commands = [
-            command
-            for block in _code_blocks(update.splitlines())
-            for command in _commands(block[1])
-        ]
-        upgrades = [command for command in commands if "--upgrade" in command]
-        self.assertTrue(upgrades, commands)
-        self.assertTrue(all(_is_plain_pip(command) for command in upgrades), commands)
-        self.assertTrue(any(_is_pinned(command) for command in upgrades), commands)
+    def test_one_update_line_and_one_uninstall_line(self) -> None:
+        update, uninstall = assert_single_update_and_uninstall(self.lines)
+        self.assertIn("| sh", update)
+        self.assertIn("--uninstall", uninstall)
 
-    def test_pipx_is_optional_and_after_the_pip_instructions(self) -> None:
-        _assert_pipx_is_optional_and_late(self.lines)
-
-    def test_existing_constraints_are_kept(self) -> None:
-        lowered = self.text.lower()
-        self.assertIn("no dependencies", lowered)
-        self.assertIn("offline", lowered)
-        self.assertIn("pip install -e", lowered)
-        self.assertIn("editable installs", lowered)
-        self.assertIn("--engine", self.text)
-        self.assertIn("$FORGEL_ENGINE", self.text)
+    def test_one_windows_line_outside_the_main_path(self) -> None:
+        assert_single_windows_line(self.lines)
 
 
-# A tiny README with the same shape, used to prove the checks fail as designed.
+# A tiny README with the same shape, used to prove the guards fail as designed.
 FIXTURE = [
     "# demo",
     "",
     "## Install",
     "",
     "```sh",
-    'python3 -m pip install "git+https://example.invalid/demo@v1.0.0"',
+    INSTALL_COMMAND,
     "```",
     "",
-    "1. Activate the virtual environment.",
+    "Python 3 and the `forgel` engine on `PATH` are required; `--engine PATH` or",
+    "`$FORGEL_ENGINE` point at a custom engine path.",
+    "",
+    "### Update",
+    "",
+    "```sh",
+    "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh",
+    "```",
+    "",
+    "### Uninstall",
+    "",
+    "```sh",
+    "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh | sh -s -- --uninstall",
+    "```",
+    "",
+    "Windows is not the main installation method; use `python -m pip install --user`.",
     "",
     "## Commands",
     "",
-    "pipx is an optional isolation alternative.",
 ]
 
 
 class ChecksFailAsDesignedTest(unittest.TestCase):
-    """The documentation checks reject the regressions they exist for."""
+    """The documentation guard rejects the regressions it exists for."""
+
+    def assert_rejected(self, check, lines) -> None:
+        with self.assertRaises(AssertionError):
+            check(lines)
 
     def test_accepts_the_good_shape(self) -> None:
-        command = _assert_first_install_is_plain_pip(FIXTURE)
-        self.assertTrue(_is_pinned(command), command)
-        _assert_pipx_is_optional_and_late(FIXTURE)
+        self.assertEqual(
+            assert_installer_command_is_first(FIXTURE), INSTALL_COMMAND
+        )
+        assert_no_alternative_main_path(FIXTURE)
+        assert_prerequisites(FIXTURE)
+        assert_single_update_and_uninstall(FIXTURE)
+        assert_single_windows_line(FIXTURE)
 
-    def test_rejects_pipx_as_the_first_install_command(self) -> None:
+    def test_rejects_pip_before_the_installer(self) -> None:
+        lines = (
+            FIXTURE[:5]
+            + ["python3 -m pip install --user forgel-code"]
+            + FIXTURE[5:]
+        )
+        self.assert_rejected(assert_installer_command_is_first, lines)
+        self.assert_rejected(assert_no_alternative_main_path, lines)
+
+    def test_rejects_a_pip_install_first_command(self) -> None:
         lines = [
-            'pipx install "git+https://example.invalid/demo@v1.0.0"'
-            if line.startswith("python3 -m pip install")
-            else line
+            FIXTURE[0],
+            "",
+            "## Install",
+            "",
+            "```sh",
+            "python3 -m pip install --user forgel-code",
+            "```",
+        ] + FIXTURE[8:]
+        self.assert_rejected(assert_installer_command_is_first, lines)
+
+    def test_rejects_a_virtual_environment_block(self) -> None:
+        lines = list(FIXTURE)
+        lines.insert(7, "```")
+        lines.insert(8, "python3 -m venv .venv")
+        self.assert_rejected(assert_no_alternative_main_path, lines)
+
+    def test_rejects_pipx_as_an_alternative(self) -> None:
+        lines = FIXTURE + ["pipx is an optional alternative."]
+        self.assert_rejected(assert_no_alternative_main_path, lines)
+
+    def test_rejects_two_update_lines(self) -> None:
+        lines = FIXTURE + [
+            "```sh",
+            "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.2/install.sh | sh",
+            "```",
+        ]
+        self.assert_rejected(assert_single_update_and_uninstall, lines)
+
+    def test_rejects_a_missing_uninstall_line(self) -> None:
+        lines = [line for line in FIXTURE if "--uninstall" not in line]
+        self.assert_rejected(assert_single_update_and_uninstall, lines)
+
+    def test_rejects_a_second_windows_line(self) -> None:
+        self.assert_rejected(
+            assert_single_windows_line,
+            FIXTURE + ["Windows users can also use pip install --user."],
+        )
+
+    def test_rejects_a_windows_line_above_the_installer(self) -> None:
+        lines = [
+            "Windows: pip install --user forgel-code, not the main method.",
+            "",
+        ] + FIXTURE
+        self.assert_rejected(assert_single_windows_line, lines)
+
+    def test_rejects_windows_offered_as_the_main_path(self) -> None:
+        lines = [
+            line.replace(
+                "is not the main installation method; use", "is the main path:"
+            )
             for line in FIXTURE
         ]
-        with self.assertRaises(AssertionError):
-            _assert_first_install_is_plain_pip(lines)
+        self.assert_rejected(assert_single_windows_line, lines)
 
-    def test_rejects_a_bare_pip_script(self) -> None:
+    def test_rejects_a_missing_engine_prerequisite(self) -> None:
         lines = [
-            'pip install "git+https://example.invalid/demo@v1.0.0"'
-            if line.startswith("python3 -m pip install")
-            else line
+            line
             for line in FIXTURE
+            if "engine" not in line.lower() and "--engine" not in line
         ]
-        with self.assertRaises(AssertionError):
-            _assert_first_install_is_plain_pip(lines)
-
-    def test_rejects_a_floating_branch(self) -> None:
-        lines = [
-            'python3 -m pip install "git+https://example.invalid/demo@main"'
-            if line.startswith("python3 -m pip install")
-            else line
-            for line in FIXTURE
-        ]
-        command = _assert_first_install_is_plain_pip(lines)
-        self.assertFalse(_is_pinned(command), command)
-
-    def test_rejects_pipx_before_the_pip_instructions(self) -> None:
-        lines = ["pipx is optional.", ""] + FIXTURE
-        with self.assertRaises(AssertionError):
-            _assert_pipx_is_optional_and_late(lines)
-
-    def test_rejects_pipx_without_the_optional_marker(self) -> None:
-        lines = [
-            "pipx installs it too." if "pipx" in line else line for line in FIXTURE
-        ]
-        with self.assertRaises(AssertionError):
-            _assert_pipx_is_optional_and_late(lines)
-
-    def test_rejects_two_pipx_mentions(self) -> None:
-        lines = FIXTURE + ["pipx is optional."]
-        with self.assertRaises(AssertionError):
-            _assert_pipx_is_optional_and_late(lines)
+        self.assert_rejected(assert_prerequisites, lines)
 
 
 if __name__ == "__main__":

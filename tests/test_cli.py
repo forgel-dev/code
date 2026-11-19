@@ -984,16 +984,16 @@ class ReadmeTest(unittest.TestCase):
         self.assertIn("no engine command", self.readme)
 
     def test_readme_has_a_pinned_install_command(self) -> None:
-        self.assertIn("forgel-dev/code@v0.1.0", self.readme)
-        self.assertIn("forgel-code==0.1.0", self.readme)
+        self.assertIn(
+            "raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh",
+            self.readme,
+        )
 
     def test_readme_has_no_default_branch_install(self) -> None:
-        self.assertNotIn("pipx install git+https://github.com/forgel-dev/code\n", self.readme)
-        self.assertNotIn("git+https://github.com/forgel-dev/code   ", self.readme)
         for line in self.readme.splitlines():
             stripped = line.strip()
-            if "git+https://github.com/forgel-dev/code" in stripped:
-                self.assertIn("@", stripped, line)
+            if "raw.githubusercontent.com/forgel-dev/code" in stripped:
+                self.assertIn("/v", stripped, line)
 
     def test_readme_has_no_editable_install_recommendation(self) -> None:
         self.assertNotIn("pip install .", self.readme)
@@ -1001,8 +1001,11 @@ class ReadmeTest(unittest.TestCase):
         self.assertIn("not supported", self.readme)
 
     def test_readme_documents_the_update_path(self) -> None:
-        self.assertIn("Update", self.readme)
-        self.assertIn("--force", self.readme)
+        self.assertIn("### Update", self.readme)
+        self.assertIn(
+            "https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh",
+            self.readme,
+        )
 
 
 if __name__ == "__main__":

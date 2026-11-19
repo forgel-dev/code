@@ -1,0 +1,327 @@
+#!/bin/sh
+# Forgel Code installer.
+#
+# One command installs the client into a per-user prefix:
+#
+#   curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh | sh
+#
+# The client goes into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}, the
+# ``forgel-code`` launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, and that
+# directory is put on PATH through one marked block in the shell profile, so no
+# virtual environment and no activation step are involved. Re-running replaces
+# the installation; running with ``--uninstall`` removes it again.
+#
+# Environment variables:
+#   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
+#   FORGEL_CODE_BIN             launcher directory (default: $HOME/.local/bin)
+#   FORGEL_CODE_SOURCE          local checkout to install from, without network
+#   FORGEL_CODE_TAG             repository tag when no checkout is given (default: v0.1.0)
+#   FORGEL_CODE_REPOSITORY      repository URL used with FORGEL_CODE_TAG
+#   FORGEL_CODE_PYTHON          Python 3 interpreter (default: python3 on PATH)
+#   FORGEL_CODE_PROFILE         shell profile to edit (default: chosen from $SHELL)
+#   FORGEL_CODE_NO_MODIFY_PATH  set to leave the shell profile untouched
+#   FORGEL_CODE_NO_PROFILE_EDIT the same opt-out under its older name
+#
+# The script is POSIX ``sh`` and safe to pipe into: it never reads stdin.
+
+set -eu
+
+# The exact markers an uninstall looks for. They are compared byte for byte.
+MARKER_START='# >>> forgel-code >>>'
+MARKER_END='# <<< forgel-code <<<'
+
+HOME_DIR=${HOME:-/}
+PREFIX=${FORGEL_CODE_HOME:-$HOME_DIR/.local/share/forgel-code}
+BIN_DIR=${FORGEL_CODE_BIN:-$HOME_DIR/.local/bin}
+LAUNCHER=$BIN_DIR/forgel-code
+TAG=${FORGEL_CODE_TAG:-v0.1.0}
+REPOSITORY=${FORGEL_CODE_REPOSITORY:-https://github.com/forgel-dev/code}
+
+usage() {
+    cat <<'USAGE'
+Usage: install.sh [--uninstall] [--help]
+
+Installs the Forgel Code client into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}
+and its launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, adding that directory
+to PATH with one marked block in the shell profile.
+
+  --uninstall   remove the installation, the launcher and the PATH block
+  --help        show this text
+
+Set FORGEL_CODE_NO_MODIFY_PATH=1 to leave the shell profile untouched; the
+script then prints the exact export PATH=... line to add yourself.
+USAGE
+}
+
+detect_python() {
+    if [ -n "${FORGEL_CODE_PYTHON:-}" ]; then
+        printf '%s\n' "$FORGEL_CODE_PYTHON"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        command -v python
+        return 0
+    fi
+    return 1
+}
+
+# A directory counts as a checkout only when it is this project, so a stray
+# pyproject.toml next to the caller cannot silently install another package.
+is_forgel_code_source() {
+    directory=$1
+    if [ -z "$directory" ] || [ ! -d "$directory" ]; then
+        return 1
+    fi
+    if [ ! -d "$directory/forgel_code" ] || [ ! -f "$directory/pyproject.toml" ]; then
+        return 1
+    fi
+    grep -q 'name = "forgel-code"' "$directory/pyproject.toml"
+}
+
+# The directory holding this script. With ``curl ... | sh`` there is none.
+script_directory() {
+    case ${0:-} in
+        */*) cd -P -- "${0%/*}" 2>/dev/null && pwd ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_source() {
+    if [ -n "${FORGEL_CODE_SOURCE:-}" ]; then
+        if ! is_forgel_code_source "$FORGEL_CODE_SOURCE"; then
+            echo "install.sh: FORGEL_CODE_SOURCE is not a Forgel Code checkout: $FORGEL_CODE_SOURCE" >&2
+            return 1
+        fi
+        printf '%s\n' "$FORGEL_CODE_SOURCE"
+        return 0
+    fi
+    for candidate in "$(script_directory 2>/dev/null || true)" "$(pwd)"; do
+        if is_forgel_code_source "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    printf '%s\n' "$REPOSITORY/archive/refs/tags/$TAG.tar.gz"
+}
+
+# Which shell profile to edit. $SHELL decides, $HOME/.profile is the fallback.
+profile_path() {
+    if [ -n "${FORGEL_CODE_PROFILE:-}" ]; then
+        printf '%s\n' "$FORGEL_CODE_PROFILE"
+        return 0
+    fi
+    shell_name=${SHELL##*/}
+    case $shell_name in
+        zsh)
+            printf '%s\n' "$HOME_DIR/.zshrc"
+            ;;
+        bash)
+            if [ -f "$HOME_DIR/.bashrc" ]; then
+                printf '%s\n' "$HOME_DIR/.bashrc"
+            elif [ -f "$HOME_DIR/.bash_profile" ]; then
+                printf '%s\n' "$HOME_DIR/.bash_profile"
+            else
+                printf '%s\n' "$HOME_DIR/.bashrc"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$HOME_DIR/.profile"
+            ;;
+    esac
+}
+
+no_profile_edit() {
+    case ${FORGEL_CODE_NO_MODIFY_PATH:-} in
+        ''|0|false|no|off) ;;
+        *) return 0 ;;
+    esac
+    case ${FORGEL_CODE_NO_PROFILE_EDIT:-} in
+        ''|0|false|no|off) ;;
+        *) return 0 ;;
+    esac
+    return 1
+}
+
+# Drop the marked block, if there is one. Every other line is kept as it was.
+remove_profile_block() {
+    profile=$1
+    if [ ! -f "$profile" ]; then
+        return 0
+    fi
+    if ! grep -Fq "$MARKER_START" "$profile"; then
+        return 0
+    fi
+    tmp=$profile.forgel-code.$$
+    if ! cp -p "$profile" "$tmp"; then
+        echo "install.sh: cannot write next to $profile" >&2
+        return 1
+    fi
+    if ! awk -v start="$MARKER_START" -v end="$MARKER_END" '
+            $0 == start { inside = 1; next }
+            inside == 1 && $0 == end { inside = 0; next }
+            inside == 1 { next }
+            { print }
+        ' "$profile" > "$tmp"; then
+        rm -f "$tmp"
+        echo "install.sh: cannot rewrite $profile" >&2
+        return 1
+    fi
+    if ! mv "$tmp" "$profile"; then
+        rm -f "$tmp"
+        echo "install.sh: cannot replace $profile" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Exactly one block, whatever the profile already held.
+add_profile_block() {
+    profile=$1
+    case $profile in
+        */*) mkdir -p "${profile%/*}" ;;
+    esac
+    if ! remove_profile_block "$profile"; then
+        return 1
+    fi
+    if [ -s "$profile" ]; then
+        if [ "$(tail -c 1 "$profile" | wc -l | tr -d ' ')" = "0" ]; then
+            printf '\n' >> "$profile"
+        fi
+    fi
+    {
+        printf '%s\n' "$MARKER_START"
+        printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+        printf '%s\n' "$MARKER_END"
+    } >> "$profile"
+    return 0
+}
+
+write_launcher() {
+    mkdir -p "$BIN_DIR"
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' '# Forgel Code launcher written by install.sh; do not edit.'
+        printf 'PYTHONPATH="%s${PYTHONPATH:+:$PYTHONPATH}"\n' "$PREFIX"
+        printf '%s\n' 'export PYTHONPATH'
+        printf 'exec "%s" -m forgel_code "$@"\n' "$PYTHON"
+    } > "$LAUNCHER"
+    chmod 755 "$LAUNCHER"
+}
+
+add_path() {
+    if no_profile_edit; then
+        echo "Leaving the shell profile untouched."
+        echo "Add this line to your shell profile:"
+        printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+        return 0
+    fi
+    profile=$(profile_path)
+    if ! add_profile_block "$profile"; then
+        return 1
+    fi
+    echo "Added $BIN_DIR to PATH in $profile"
+    echo "Open a new shell to pick the change up."
+    return 0
+}
+
+install_client() {
+    if ! PYTHON=$(detect_python); then
+        echo "install.sh: no Python 3 interpreter found on PATH" >&2
+        return 1
+    fi
+    if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+        echo "install.sh: $PYTHON is older than Python 3.9 or cannot run" >&2
+        return 1
+    fi
+    if ! "$PYTHON" -c 'import pip' >/dev/null 2>&1; then
+        echo "install.sh: $PYTHON has no pip module; install pip and try again" >&2
+        return 1
+    fi
+    if ! SOURCE=$(resolve_source); then
+        return 1
+    fi
+    echo "Installing Forgel Code from $SOURCE"
+    mkdir -p "$PREFIX"
+    if ! "$PYTHON" -m pip install \
+        --target "$PREFIX" \
+        --upgrade \
+        --no-deps \
+        --no-index \
+        --no-cache-dir \
+        --no-build-isolation \
+        --disable-pip-version-check \
+        --no-warn-script-location \
+        "$SOURCE"; then
+        echo "install.sh: installing the client failed" >&2
+        return 1
+    fi
+    if ! write_launcher; then
+        echo "install.sh: cannot write $LAUNCHER" >&2
+        return 1
+    fi
+    if ! installed=$("$LAUNCHER" --version); then
+        echo "install.sh: the installed launcher does not run" >&2
+        return 1
+    fi
+    printf '%s\n' "$installed"
+    echo "Installed into $PREFIX"
+    echo "Launcher: $LAUNCHER"
+    add_path
+}
+
+uninstall() {
+    status=0
+    if [ -d "$PREFIX" ]; then
+        if rm -rf "$PREFIX"; then
+            echo "Removed $PREFIX"
+        else
+            echo "install.sh: cannot remove $PREFIX" >&2
+            status=1
+        fi
+    fi
+    if [ -f "$LAUNCHER" ]; then
+        if rm -f "$LAUNCHER"; then
+            echo "Removed $LAUNCHER"
+        else
+            echo "install.sh: cannot remove $LAUNCHER" >&2
+            status=1
+        fi
+    fi
+    profile=$(profile_path)
+    if [ -f "$profile" ] && grep -Fq "$MARKER_START" "$profile"; then
+        if remove_profile_block "$profile"; then
+            echo "Removed the PATH block from $profile"
+        else
+            status=1
+        fi
+    fi
+    if [ "$status" = "0" ]; then
+        echo "Forgel Code is uninstalled."
+    fi
+    return "$status"
+}
+
+main() {
+    case ${1:-} in
+        '')
+            install_client
+            ;;
+        --uninstall)
+            uninstall
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "install.sh: unknown argument: $1" >&2
+            usage >&2
+            return 2
+            ;;
+    esac
+}
+
+main "$@"
