@@ -116,6 +116,21 @@ class Engine:
         self.binary = binary
         self.timeout = float(timeout)
 
+    def label(self) -> str:
+        """How this engine is named in a report: its identity is its path."""
+        return "engine %s" % self.binary
+
+    def failure(
+        self,
+        detail: str,
+        returncode: int,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> "EngineError":
+        """An engine error that names the engine which failed."""
+        return EngineError(
+            "%s: %s" % (self.label(), detail), returncode, payload
+        )
+
     def command(self, arguments: Sequence[str]) -> list:
         """Return the child argv: ``forgel <command> --json``."""
         return [self.binary, *arguments, "--json"]
@@ -131,17 +146,17 @@ class Engine:
                 timeout=self.timeout,
             )
         except FileNotFoundError:
-            raise EngineError(
-                "engine executable not found: %s" % self.binary, 127
+            raise self.failure(
+                "executable not found: %s" % self.binary, 127
             ) from None
         except subprocess.TimeoutExpired:
-            raise EngineError(
-                "engine timed out after %s seconds: %s"
-                % (_format_seconds(self.timeout), self.binary),
+            raise self.failure(
+                "timed out after %s seconds"
+                % _format_seconds(self.timeout),
                 TIMEOUT_EXIT_CODE,
             ) from None
         except OSError as exc:
-            raise EngineError("cannot run engine: %s" % exc, 126) from None
+            raise self.failure("cannot run: %s" % exc, 126) from None
 
         # The engine always speaks UTF-8; the process locale must not matter.
         stdout = completed.stdout.decode("utf-8", "replace")
@@ -163,13 +178,17 @@ class Engine:
             else:
                 message = stderr.strip() or stdout.strip()
                 if not message:
-                    message = "engine exited with code %d" % returncode
+                    message = "exited with code %d" % returncode
                 fields = None
-            raise EngineError(message, returncode or 1, fields)
+            raise self.failure(message, returncode or 1, fields)
 
         if payload is None:
-            message = unreadable.message if unreadable is not None else "engine printed no output"
-            raise EngineError(message, 1)
+            message = (
+                unreadable.message
+                if unreadable is not None
+                else "printed no output"
+            )
+            raise self.failure(message, 1)
 
         if payload.get("ok") is False:
             # A structured refusal is a failure even when the engine exited 0,
@@ -178,8 +197,8 @@ class Engine:
             if error is not None:
                 message = _structured_message(error)
             else:
-                message = stderr.strip() or stdout.strip() or "engine reported ok=false"
-            raise EngineError(
+                message = stderr.strip() or stdout.strip() or "reported ok=false"
+            raise self.failure(
                 message, 1, error if isinstance(error, dict) else None
             )
 

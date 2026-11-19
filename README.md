@@ -103,7 +103,9 @@ when nothing was passed. On failure — including an argument-parse error — th
 client exits with a non-zero code and, with `--json`, prints one JSON object
 with `"ok": false` and the message under `error`. A structured engine refusal
 (`"ok": false` in the engine's answer) is a failure even when the engine exits
-with code 0, and its own fields are carried through.
+with code 0, and its own fields are carried through. A failure report names the
+engine that answered: the path configured by `--engine`, `$FORGEL_ENGINE` or
+`forgel` leads the message.
 
 ### Active project
 
@@ -117,8 +119,14 @@ active project is used. Set `FORGEL_CODE_HOME` to move the session file.
 
 The engine call is bounded. `--timeout SECONDS` sets the limit for one call,
 `$FORGEL_CODE_TIMEOUT` sets it for the environment, and the default is 600
-seconds. The engine's stdout is always decoded as UTF-8 and the child process
-does not receive the client's stdin.
+seconds. When the limit elapses the client kills the engine and fails with a
+structured error instead of blocking. The engine's stdout is always decoded as
+UTF-8 and the child process does not receive the client's stdin.
+
+`--json`, `--engine` and `--timeout` are parsed as options of their own and are
+never substituted inside argument text, so a phrase or remark that mentions
+such a word reaches the engine unchanged. Put `--` before a remark that itself
+begins with a hyphen.
 
 ## Tests
 

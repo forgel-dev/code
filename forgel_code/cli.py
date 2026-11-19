@@ -47,6 +47,18 @@ TASK_ACTIONS = {"accept": "accept", "rework": "reject"}
 # unknown action. The client reads it from the return code, never from text.
 ENGINE_USAGE_EXIT_CODE = 2
 
+# The structured codes the engine uses for that same usage error. Any other
+# code describes a failure of a command the engine knows, not a missing one.
+USAGE_CODES = frozenset(
+    [
+        "unsupported_command",
+        "unknown_command",
+        "unknown_action",
+        "usage",
+        "invalid_choice",
+    ]
+)
+
 # Engine commands that operate on the active project.
 PROJECT_SCOPED = frozenset(
     [
@@ -205,9 +217,7 @@ def engine_arguments(args: argparse.Namespace, project: Optional[str]) -> List[s
     if command == "say":
         # The engine reserves its positional for the project key; the phrase
         # travels in --text so the two cannot consume each other.
-        return with_project(
-            ["say", "--text", " ".join(args.phrase)]
-        )
+        return with_project(["say", "--text", " ".join(args.phrase)])
     if command == "task":
         # The engine reads tasks through its list command; the client picks the
         # requested one out of that machine-readable answer.
@@ -277,6 +287,8 @@ def missing_engine_command(command: str, exc: EngineError) -> Optional[str]:
 
     The decision rests on the engine's return code and structured fields, never
     on the human-readable wording of its message, so it is locale-independent.
+    A code that describes something other than a usage error means the engine
+    knows the command and it failed; that is not a missing command.
     """
     action = TASK_ACTIONS.get(command)
     if action is None:
@@ -284,14 +296,10 @@ def missing_engine_command(command: str, exc: EngineError) -> Optional[str]:
     if exc.returncode != ENGINE_USAGE_EXIT_CODE:
         return None
     payload = exc.payload or {}
-    code = payload.get("code") or payload.get("kind")
-    if code is not None and str(code) not in (
-        "unknown_command",
-        "unknown_action",
-        "usage",
-        "invalid_choice",
-    ):
-        return None
+    if not payload.get("unsupported_command"):
+        code = payload.get("code") or payload.get("kind")
+        if code is not None and str(code) not in USAGE_CODES:
+            return None
     return (
         "forgel-code %s: the engine reports no engine command for this action "
         "(`forgel task %s` is not available: %s)" % (command, action, exc.message)
@@ -382,7 +390,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         result = engine.run(arguments)
         if command == "task":
-            result = select_task(result, args.task_id)
+            try:
+                result = select_task(result, args.task_id)
+            except EngineError as exc:
+                # The engine answered; finding the task in its answer failed.
+                raise engine.failure(exc.message, exc.returncode) from None
         if command == "use":
             session.save_project(args.key)
             reported_project = args.key
