@@ -203,7 +203,11 @@ def engine_arguments(args: argparse.Namespace, project: Optional[str]) -> List[s
         return argv
 
     if command == "say":
-        return with_project(["say", " ".join(args.phrase)])
+        # The engine reserves its positional for the project key; the phrase
+        # travels in --text so the two cannot consume each other.
+        return with_project(
+            ["say", "--text", " ".join(args.phrase)]
+        )
     if command == "task":
         # The engine reads tasks through its list command; the client picks the
         # requested one out of that machine-readable answer.

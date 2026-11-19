@@ -184,7 +184,10 @@ PAYLOAD = {
 # while no project has been selected yet. The engine's own ``--json`` flag is
 # appended by the client.
 COMMAND_CASES = [
-    (("say", "add", "a", "login", "screen"), ["say", "add a login screen"]),
+    (
+        ("say", "add", "a", "login", "screen"),
+        ["say", "--text", "add a login screen"],
+    ),
     (("status",), ["status"]),
     (("tasks",), ["tasks"]),
     (("task", "t-1"), ["tasks"]),
@@ -388,7 +391,10 @@ class CommandTest(ClientTestCase):
     def test_say_keeps_a_phrase_mentioning_json(self) -> None:
         code, stdout, stderr = self.run_client("say", "add the --json flag", "--json")
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(self.last_engine_argv(), ["say", "add the --json flag", "--json"])
+        self.assertEqual(
+            self.last_engine_argv(),
+            ["say", "--text", "add the --json flag", "--json"],
+        )
         self.assertEqual(json.loads(stdout)["result"], PAYLOAD)
 
     def test_engine_option_is_parsed_not_scanned(self) -> None:
