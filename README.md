@@ -11,38 +11,96 @@ project files and never runs checks itself.
 
 ## Install
 
-Install a pinned revision — a tag, a commit or an exact version — never the
-moving default branch:
+Forgel Code installs with the pip bundled with Python 3 — no extra tool is
+needed. Install a pinned revision — a tag, a commit hash or an exact version —
+never the moving default branch. The first command block is the plain pip
+install into a virtual environment:
 
 ```sh
-pipx install "git+https://github.com/forgel-dev/code@v0.1.0"
-# or, from a pinned checkout:
-pip install "git+https://github.com/forgel-dev/code@<commit-sha>"
-# or, from a package index once a release is published:
-pip install "forgel-code==0.1.0"
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+python3 -m pip install "git+https://github.com/forgel-dev/code@v0.1.0"
 ```
 
-This provides the executable `forgel-code`. The build has no dependencies: the
-repository ships a small in-tree PEP 517 backend (`_build_backend.py`), so the
-install works offline and does not need setuptools or a package index. The
-engine (`forgel`) must be available on `PATH`; use `--engine PATH` or
-`$FORGEL_ENGINE` to point at a specific binary.
+### System Python without a virtual environment
+
+`--user` installs under your home directory, so neither root access nor a
+virtual environment is required:
+
+```sh
+python3 -m pip install --user "git+https://github.com/forgel-dev/code@v0.1.0"
+```
+
+Once a release is published on a package index, the exact version pins the
+same revision:
+
+```sh
+python3 -m pip install "forgel-code==0.1.0"
+```
+
+### Where `forgel-code` lands and how to reach it
+
+pip writes the `forgel-code` executable into the `bin` directory of the
+environment it installed into — `.venv/bin/forgel-code` after the activation
+above, or `.venv\Scripts\forgel-code.exe` on Windows. A `--user` install uses
+pip's user scripts directory instead: `~/.local/bin` on Linux and macOS,
+`%APPDATA%\Python\Python3x\Scripts` on Windows.
+
+Activating the virtual environment already puts `.venv/bin` on `PATH`. If
+`forgel-code` is not found, locate the scripts directory and add it to `PATH`:
+
+```sh
+python3 -m site --user-base         # the user scripts live in <that>/bin
+python3 -m pip show -f forgel-code  # files and location of the install
+export PATH="$HOME/.local/bin:$PATH"   # Windows: setx PATH "%APPDATA%\Python\Python3x\Scripts;%PATH%"
+```
+
+With the scripts directory on `PATH`, `forgel-code --version` prints the
+installed version.
+
+### Fallback: run the module
+
+A `PATH` that does not include the scripts directory is not fatal — the
+interpreter the package was installed into can run it as a module:
+
+```sh
+python3 -m forgel_code --version
+```
+
+Use the interpreter that owns the install: `.venv/bin/python3` with the virtual
+environment active, or the system `python3` after a `--user` install.
+
+The build has no dependencies: the repository ships a small in-tree PEP 517
+backend (`_build_backend.py`), so the install works offline and does not need
+setuptools or a package index. The engine (`forgel`) must be available on
+`PATH`; use `--engine PATH` or `$FORGEL_ENGINE` to point at a specific binary.
 
 Editable installs (`pip install -e`) are not supported: the in-tree backend
 implements only the `build_wheel` and `build_sdist` PEP 517 hooks.
 
+`pipx`, an optional alternative for isolation only, can install the same pinned
+revision (`git+https://github.com/forgel-dev/code@v0.1.0`) instead — plain pip
+above stays the primary path.
+
 ### Update
 
-Updating means pinning a newer revision. Pick the tag, commit or version you
-want and reinstall it, replacing the old one:
+Updating means installing a newer pinned revision over the old one;
+`--upgrade` moves to that version:
 
 ```sh
-pipx install --force "git+https://github.com/forgel-dev/code@v0.1.1"
-# or, with plain pip:
-pip install --upgrade "forgel-code==0.1.1"
+python3 -m pip install --upgrade "git+https://github.com/forgel-dev/code@v0.1.1"
 ```
 
-`forgel-code --version` prints the version that is actually installed.
+When the version number is unchanged and only the commit moved, pip can treat
+the pinned requirement as already satisfied and keep the old code. Force the
+reinstall of that exact commit:
+
+```sh
+python3 -m pip install --upgrade --force-reinstall "git+https://github.com/forgel-dev/code@<commit-sha>"
+```
+
+`forgel-code --version` prints the version that is actually installed, and
+`python3 -m forgel_code --version` does the same when `PATH` does not help.
 
 ## Commands
 
@@ -133,6 +191,10 @@ begins with a hyphen.
 ```sh
 python -m unittest discover -s tests
 ```
+
+`python3 -m pytest -q` runs the same suite: when pytest is not installed, the
+in-tree `pytest.py` shim forwards to `unittest`, and a real pytest is used when
+it is available.
 
 ## License
 
