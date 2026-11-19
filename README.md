@@ -192,10 +192,6 @@ begins with a hyphen.
 python -m unittest discover -s tests
 ```
 
-`python3 -m pytest -q` runs the same suite: when pytest is not installed, the
-in-tree `pytest.py` shim forwards to `unittest`, and a real pytest is used when
-it is available.
-
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
