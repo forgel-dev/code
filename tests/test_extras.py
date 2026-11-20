@@ -172,7 +172,7 @@ class PyprojectExtrasTest(unittest.TestCase):
         self.extras = _declared_extras()
         self.text = PYPROJECT.read_text(encoding="utf-8")
 
-    def test_exactly_one_extra_named_test(self) -> None:
+    def test_pyproject_declares_exactly_one_extra_named_test(self) -> None:
         self.assertEqual(sorted(self.extras), [EXTRA])
 
     def test_the_extra_declares_one_requirement(self) -> None:
@@ -229,6 +229,15 @@ class WheelExtrasTest(ExtrasCase):
         expected = '%s; extra == "%s"' % (declared, EXTRA)
         self.assertIn(expected, _requires_dist(metadata))
 
+    def test_no_drift_between_pyproject_and_wheel_metadata(self) -> None:
+        name = self.backend.build_wheel(str(self.out))
+        metadata = self.wheel_metadata(name)
+        declared = _declared_extras()[EXTRA]
+        self.assertEqual(
+            sorted(_requires_dist(metadata)),
+            sorted("%s; %s" % (requirement, MARKER) for requirement in declared),
+        )
+
     def test_prepared_metadata_matches_the_wheel(self) -> None:
         name = self.backend.build_wheel(str(self.out))
         wheel = self.wheel_metadata(name)
@@ -264,7 +273,7 @@ class SdistExtrasTest(ExtrasCase):
 class SingleSourceTest(ExtrasCase):
     """R4: rewriting the table in a copy changes the emitted metadata."""
 
-    def test_rewriting_the_table_changes_the_metadata(self) -> None:
+    def test_single_source_rewriting_the_table_changes_the_metadata(self) -> None:
         declared = _declared_extras()[EXTRA][0]
         path = self.root / "pyproject.toml"
         original = path.read_text(encoding="utf-8")
@@ -285,6 +294,28 @@ class SingleSourceTest(ExtrasCase):
             _header_lines(metadata),
         )
         self.assertNotIn(declared, metadata)
+
+    def test_single_source_rewriting_the_table_changes_the_sdist(self) -> None:
+        declared = _declared_extras()[EXTRA][0]
+        path = self.root / "pyproject.toml"
+        original = path.read_text(encoding="utf-8")
+        changed = original.replace(declared, "pytest>=98")
+        self.assertNotEqual(
+            changed, original, "the pyproject requirement was not found"
+        )
+        path.write_text(changed, encoding="utf-8")
+
+        backend = _load_backend(self.root, "forgel_code_extras_rewritten_sdist")
+        name = backend.build_sdist(str(self.out))
+        with tarfile.open(self.out / name) as archive:
+            member = archive.extractfile("%s/PKG-INFO" % backend.SDIST_ROOT)
+            assert member is not None
+            pkg_info = member.read().decode("utf-8")
+        self.assertIn(
+            'Requires-Dist: pytest>=98; extra == "%s"' % EXTRA,
+            _header_lines(pkg_info),
+        )
+        self.assertNotIn(declared, pkg_info)
 
 
 class FallbackParserTest(ExtrasCase):
@@ -420,7 +451,7 @@ class OfflineExtraInstallTest(unittest.TestCase):
             timeout=TIMEOUT,
         )
 
-    def test_install_exits_zero(self) -> None:
+    def test_offline_install_exits_zero(self) -> None:
         self.assertEqual(
             self.install.returncode,
             0,
@@ -428,7 +459,7 @@ class OfflineExtraInstallTest(unittest.TestCase):
             % (EXTRA, self.install.stdout, self.install.stderr),
         )
 
-    def test_the_installed_metadata_declares_the_extra(self) -> None:
+    def test_offline_install_metadata_declares_the_extra(self) -> None:
         self.assertEqual(self.install.returncode, 0, self.install.stderr)
         metadata_files = sorted(self.target.glob("forgel_code-*.dist-info/METADATA"))
         self.assertTrue(metadata_files, "pip wrote no forgel_code METADATA")
