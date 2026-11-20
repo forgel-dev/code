@@ -6,7 +6,7 @@
 - Release train: `20261120225130120934_forgel-code-0-1-0`
 - Preset: python
 - Version files: none
-- GitHub release: pending
+- GitHub release: https://github.com/forgel-dev/code/releases/tag/v0.1.0
 
 ## Tasks
 
