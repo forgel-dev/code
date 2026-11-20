@@ -29,6 +29,8 @@ MAIN_PATH_TOKENS = (
 )
 # The same alternatives anywhere in the file, Windows line excepted.
 FORBIDDEN_TOKENS = ("pipx", "python -m venv", "python3 -m venv")
+# An editable install: the shorthand flag as a word of its own, or the long one.
+EDITABLE_RE = re.compile(r"(^|\s)-e(\s|$)|--editable\b")
 PIPELINE_RE = re.compile(
     r"curl\b[^\n]*?"
     r"raw\.githubusercontent\.com/forgel-dev/code/"
@@ -64,8 +66,8 @@ def _headings(lines):
     return found
 
 
-def _section_range(lines, title):
-    """``(start, end)`` line indices of the section whose heading reads ``title``."""
+def _locate_section(lines, title):
+    """``(start, end)`` line indices of the section ``title``, or ``None``."""
     headings = _headings(lines)
     for position, (index, level, heading) in enumerate(headings):
         if heading.strip().lower() != title:
@@ -76,7 +78,15 @@ def _section_range(lines, title):
                 end = next_index
                 break
         return index + 1, end
-    raise AssertionError("README.md has no section titled %r" % title)
+    return None
+
+
+def _section_range(lines, title):
+    """``(start, end)`` line indices of the section whose heading reads ``title``."""
+    found = _locate_section(lines, title)
+    if found is None:
+        raise AssertionError("README.md has no section titled %r" % title)
+    return found
 
 
 def _section_lines(lines, title):
@@ -154,7 +164,12 @@ def assert_installer_command_is_first(lines):
 
 
 def assert_no_alternative_main_path(lines):
-    """Only the one-command installer is a main path; the Windows line is marked."""
+    """Only the one-command installer is a main path; the Windows line is marked.
+
+    The single exception is the ``## Tests`` section: it may show a
+    ``pip install`` line that carries the ``[test]`` extra, because that line
+    fetches the test runner rather than installing the client for daily use.
+    """
     windows = set(_windows_lines(lines))
     start, end = _section_range(lines, "install")
     for position in range(start, end):
@@ -167,11 +182,15 @@ def assert_no_alternative_main_path(lines):
                     "the install section names another installation path (%r): %s"
                     % (token, lines[position])
                 )
+    tests = _locate_section(lines, "tests")
     for position, line in enumerate(lines):
         if position in windows:
             continue
         lowered = line.lower()
         if "pip install" in lowered or "--user" in lowered:
+            in_tests = tests is not None and tests[0] <= position < tests[1]
+            if in_tests and "[test]" in lowered and "--user" not in lowered:
+                continue
             raise AssertionError(
                 "a pip install line sits on the main path: %s" % line
             )
@@ -181,6 +200,42 @@ def assert_no_alternative_main_path(lines):
                     "README.md names another installation path (%r): %s"
                     % (token, line)
                 )
+
+
+def assert_no_editable_install(lines):
+    """README.md never proposes an editable install the backend cannot serve."""
+    for position, line in enumerate(lines):
+        match = EDITABLE_RE.search(line.lower())
+        if match:
+            raise AssertionError(
+                "README.md proposes an editable install (%r) on line %d: %s"
+                % (match.group(0).strip(), position + 1, line)
+            )
+
+
+def assert_tests_section(lines):
+    """The Tests section shows the ``[test]`` install and the no-install path."""
+    commands = _section_commands(lines, "tests")
+    extra_installs = [
+        command
+        for command in commands
+        if "pip install" in command.lower() and "[test]" in command.lower()
+    ]
+    if len(extra_installs) != 1:
+        raise AssertionError(
+            "expected exactly one pip install line with the test extra in the "
+            "Tests section, found %r" % (extra_installs,)
+        )
+    if "python -m pytest -q" not in commands:
+        raise AssertionError(
+            "the Tests section does not run python -m pytest -q: %r" % (commands,)
+        )
+    if "python -m unittest discover -s tests" not in commands:
+        raise AssertionError(
+            "the Tests section drops the no-install unittest path: %r"
+            % (commands,)
+        )
+    return extra_installs[0]
 
 
 def assert_prerequisites(lines):
@@ -287,6 +342,13 @@ class ReadmeInstallTest(unittest.TestCase):
     def test_no_alternative_main_path(self) -> None:
         assert_no_alternative_main_path(self.lines)
 
+    def test_no_editable_install(self) -> None:
+        self.assertIsNone(assert_no_editable_install(self.lines))
+
+    def test_tests_section_shows_the_extra_install(self) -> None:
+        command = assert_tests_section(self.lines)
+        self.assertIn("[test]", command)
+
     def test_installer_line_is_inside_a_code_block(self) -> None:
         self.assertIn(INSTALL_COMMAND, _section_commands(self.lines, "install"))
 
@@ -333,6 +395,24 @@ FIXTURE = [
     "",
 ]
 
+# The Tests section the guards must accept: the extra install plus the
+# no-install path.
+TESTS_FIXTURE = [
+    "## Tests",
+    "",
+    "```sh",
+    'python3 -m pip install "https://example.invalid/code-v0.1.1.tar.gz[test]"',
+    "python -m pytest -q",
+    "```",
+    "",
+    "From a checkout, with nothing installed:",
+    "",
+    "```sh",
+    "python -m unittest discover -s tests",
+    "```",
+    "",
+]
+
 
 class ChecksFailAsDesignedTest(unittest.TestCase):
     """The documentation guard rejects the regressions it exists for."""
@@ -349,6 +429,45 @@ class ChecksFailAsDesignedTest(unittest.TestCase):
         assert_prerequisites(FIXTURE)
         assert_single_update_and_uninstall(FIXTURE)
         assert_single_windows_line(FIXTURE)
+
+    def test_accepts_the_extra_install_inside_the_tests_section(self) -> None:
+        lines = FIXTURE + TESTS_FIXTURE
+        assert_no_alternative_main_path(lines)
+        assert_no_editable_install(lines)
+        command = assert_tests_section(lines)
+        self.assertIn("[test]", command)
+
+    def test_rejects_a_tests_section_without_the_runner(self) -> None:
+        lines = FIXTURE + [
+            line for line in TESTS_FIXTURE if "pytest" not in line
+        ]
+        self.assert_rejected(assert_tests_section, lines)
+
+    def test_rejects_a_tests_section_without_the_no_install_path(self) -> None:
+        lines = FIXTURE + [
+            line for line in TESTS_FIXTURE if "unittest" not in line
+        ]
+        self.assert_rejected(assert_tests_section, lines)
+
+    def test_rejects_a_pip_install_outside_the_tests_section(self) -> None:
+        lines = FIXTURE + ['python3 -m pip install "forgel-code[test]"']
+        self.assert_rejected(assert_no_alternative_main_path, lines)
+
+    def test_rejects_a_pip_install_in_the_tests_section_without_the_extra(
+        self,
+    ) -> None:
+        lines = FIXTURE + [
+            line.replace("[test]", "") for line in TESTS_FIXTURE
+        ]
+        self.assert_rejected(assert_no_alternative_main_path, lines)
+
+    def test_rejects_an_editable_install(self) -> None:
+        lines = FIXTURE + ["```sh", "python3 -m pip install -e .", "```"]
+        self.assert_rejected(assert_no_editable_install, lines)
+
+    def test_rejects_the_editable_long_flag(self) -> None:
+        lines = FIXTURE + ["An editable install with `--editable` works."]
+        self.assert_rejected(assert_no_editable_install, lines)
 
     def test_rejects_pip_before_the_installer(self) -> None:
         lines = (

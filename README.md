@@ -151,8 +151,18 @@ begins with a hyphen.
 
 ## Tests
 
+From a checkout the suite needs nothing but the Python standard library:
+
 ```sh
 python -m unittest discover -s tests
+```
+
+Installing the client with its `test` extra brings the pytest the wheel
+declares, so a pinned revision can run the same suite too:
+
+```sh
+python3 -m pip install "https://github.com/forgel-dev/code/archive/refs/tags/v0.1.1.tar.gz[test]"
+python -m pytest -q
 ```
 
 ## License

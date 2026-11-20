@@ -22,5 +22,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+# The test runner is not a runtime dependency. This table is the single source
+# of the extra: the in-tree backend reads it back out of this file to publish
+# `Provides-Extra` and `Requires-Dist` in the wheel and the sdist.
+test = ["pytest>=7"]
+
 [project.scripts]
 forgel-code = "forgel_code.cli:main"
