@@ -31,10 +31,13 @@ PROFILE_NAMES = (
 )
 
 # Every profile file an uninstall cleans, wherever an install put the block.
+# ``.bashrc`` is listed because a bash user's startup file may carry the block
+# even when the login profile is a different file.
 CANDIDATE_PROFILES = (
     ".zshrc",
     ".zprofile",
     ".zshenv",
+    ".bashrc",
     ".bash_profile",
     ".bash_login",
     ".profile",
@@ -225,6 +228,11 @@ def _marker_count(profile: Path) -> int:
         for line in profile.read_text(encoding="utf-8").splitlines()
         if line.strip() == MARKER_START
     )
+
+
+def _marked_block(bin_dir: Path) -> str:
+    """The exact block the install path appends to the profile it selects."""
+    return '%s\nexport PATH="%s:$PATH"\n%s\n' % (MARKER_START, bin_dir, MARKER_END)
 
 
 class InstallerCase(unittest.TestCase):
@@ -557,11 +565,7 @@ class InstallerUninstallTest(InstallerCase):
         for name in CANDIDATE_PROFILES:
             path = self.home / name
             path.write_text(
-                "export EDITOR=vi\n"
-                "%s\n"
-                'export PATH="%s:$PATH"\n'
-                "%s\n" % (MARKER_START, self.bin_dir, MARKER_END),
-                encoding="utf-8",
+                "export EDITOR=vi\n" + _marked_block(self.bin_dir), encoding="utf-8"
             )
             touched[name] = path
         installed = self.install()
@@ -580,6 +584,69 @@ class InstallerUninstallTest(InstallerCase):
                 "%s kept the PATH block" % name,
             )
 
+    def test_uninstall_removes_the_marked_block_from_bashrc(self) -> None:
+        """A bash home whose block lives in ``~/.bashrc`` is cleaned too."""
+        bashrc = self.home / ".bashrc"
+        bashrc.write_text(
+            "# keep-before\nexport EDITOR=vi\n" + _marked_block(self.bin_dir)
+            + "# keep-after\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            (self.home / ".bash_profile").exists(),
+            "the fixture must not create ~/.bash_profile",
+        )
+
+        result = self.install("--uninstall")
+        self.assertEqual(
+            result.returncode,
+            0,
+            "uninstall failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(
+            bashrc.read_text(encoding="utf-8"),
+            "# keep-before\nexport EDITOR=vi\n# keep-after\n",
+        )
+        self.assertEqual(_marker_count(bashrc), 0)
+        self.assertNotIn(MARKER_END, bashrc.read_text(encoding="utf-8"))
+
+    def test_repeated_uninstall_of_bashrc_is_idempotent(self) -> None:
+        """A second ``--uninstall`` leaves every candidate file unchanged."""
+        for name in CANDIDATE_PROFILES:
+            (self.home / name).write_text(
+                "# keep-%s\n" % name + _marked_block(self.bin_dir),
+                encoding="utf-8",
+            )
+
+        first = self.install("--uninstall")
+        self.assertEqual(
+            first.returncode,
+            0,
+            "uninstall failed:\n%s\n%s" % (first.stdout, first.stderr),
+        )
+        snapshot = {
+            name: (self.home / name).read_text(encoding="utf-8")
+            for name in CANDIDATE_PROFILES
+        }
+        for name, text in snapshot.items():
+            self.assertEqual(text, "# keep-%s\n" % name, "%s kept the block" % name)
+
+        second = self.install("--uninstall")
+        self.assertEqual(
+            second.returncode,
+            0,
+            "second uninstall failed:\n%s\n%s" % (second.stdout, second.stderr),
+        )
+        for name, text in snapshot.items():
+            path = self.home / name
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                text,
+                "%s changed on the second uninstall" % name,
+            )
+            self.assertEqual(_marker_count(path), 0, name)
+        self.assertNotIn("Removed the PATH block", second.stdout)
+
 
 class InstallerProfileOverrideUninstallTest(InstallerCase):
     """``--uninstall`` also cleans the profile ``FORGEL_CODE_PROFILE`` names."""
@@ -590,10 +657,8 @@ class InstallerProfileOverrideUninstallTest(InstallerCase):
     def write_block(self, profile: Path) -> None:
         profile.write_text(
             "# keep-before\n"
-            "%s\n"
-            'export PATH="%s:$PATH"\n'
-            "%s\n"
-            "# keep-after\n" % (MARKER_START, self.bin_dir, MARKER_END),
+            + _marked_block(self.bin_dir)
+            + "# keep-after\n",
             encoding="utf-8",
         )
 
@@ -682,11 +747,7 @@ class InstallerProfileOverrideUninstallTest(InstallerCase):
 
     def test_override_naming_a_standard_profile_is_cleaned_once(self) -> None:
         self.profile.write_text(
-            "# keep\n"
-            "%s\n"
-            'export PATH="%s:$PATH"\n'
-            "%s\n"
-            "# tail\n" % (MARKER_START, self.bin_dir, MARKER_END),
+            "# keep\n" + _marked_block(self.bin_dir) + "# tail\n",
             encoding="utf-8",
         )
         result = self.uninstall(FORGEL_CODE_PROFILE=self.profile)

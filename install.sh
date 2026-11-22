@@ -48,8 +48,11 @@ CHECK_PATH=/usr/bin:/bin
 CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forgel-code || true); printf "forgel-fresh-resolved=%s\n" "$fresh"'
 
 # The profile files this installer can have written. ``--uninstall`` cleans the
-# block out of every one of them, so no stale PATH entry stays behind.
-PROFILE_NAMES='.zshrc .zprofile .zshenv .bash_profile .bash_login .profile'
+# block out of every one of them, so no stale PATH entry stays behind. The list
+# is a superset of what the install path may edit, including ~/.bashrc, because
+# a non-login bash session reads that file and an earlier installation could
+# have left its block there.
+PROFILE_NAMES='.zshrc .zprofile .zshenv .bash_profile .bash_login .profile .bashrc'
 
 # Set by ``verify_profile`` once the fresh shell resolved the launcher.
 VERIFIED_PATH=
