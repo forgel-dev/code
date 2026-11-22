@@ -17,9 +17,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import forgel_code  # noqa: E402  (the package the backend is supposed to pack)
 
-VERSION = forgel_code.__version__
+def _declared_version() -> str:
+    """The single source of the version: ``forgel_code/__init__.py:__version__``.
+
+    Read from the file rather than from an import, so the expectation describes
+    what the build packs even when an installed copy of the distribution is
+    importable first on this interpreter's path.
+    """
+    text = (ROOT / "forgel_code" / "__init__.py").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("__version__"):
+            return line.split("=", 1)[1].strip().strip("\"'")
+    raise AssertionError("forgel_code/__init__.py declares no __version__")
+
+
+VERSION = _declared_version()
 
 # The whole checkout is copied, so a test never writes into the real tree and a
 # build never picks up a leftover from an interrupted run.
