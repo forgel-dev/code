@@ -13,7 +13,7 @@
 # shell; a shell outside the zsh and bash families gets the block in
 # $HOME/.profile and a warning that names the edited file. After writing the
 # block the installer starts that shell as a login interactive shell from a
-# cleared environment, under a bounded time limit, and checks that
+# cleared environment, under a hard time limit, and checks that
 # ``forgel-code`` resolves to the launcher it just wrote. Re-running replaces the
 # installation; running with ``--uninstall`` removes it again.
 #
@@ -27,6 +27,7 @@
 #   FORGEL_CODE_PROFILE         shell profile to edit (default: chosen from the login shell)
 #   FORGEL_CODE_NO_MODIFY_PATH  set to leave the shell profile untouched
 #   FORGEL_CODE_NO_PROFILE_EDIT the same opt-out under its older name
+#   FORGEL_CODE_TIMEOUT         seconds the fresh-shell check may take (default: 10)
 #
 # The script is POSIX ``sh`` and safe to pipe into: it never reads stdin.
 
@@ -35,6 +36,13 @@ set -eu
 # The exact markers an uninstall looks for. They are compared byte for byte.
 MARKER_START='# >>> forgel-code >>>'
 MARKER_END='# <<< forgel-code <<<'
+
+# A profile whose last line has no final newline cannot be restored byte for
+# byte from the block alone: the newline that separates that line from the
+# block is indistinguishable from one the file always had. The installer
+# records the case in one comment line directly above the block and removes
+# that line, with the separator newline, together with the block.
+MARKER_SEPARATOR='# forgel-code: the line above had no final newline'
 
 HOME_DIR=${HOME:-/}
 PREFIX=${FORGEL_CODE_HOME:-$HOME_DIR/.local/share/forgel-code}
@@ -49,12 +57,13 @@ REPOSITORY=${FORGEL_CODE_REPOSITORY:-https://github.com/forgel-dev/code}
 CHECK_PATH=/usr/bin:/bin
 CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forgel-code || true); printf "forgel-fresh-resolved=%s\n" "$fresh"'
 
-# The bound for the fresh-shell check, in seconds. It is an internal constant,
-# not a documented environment variable, and it is enforced by a portable
-# watchdog so no GNU coreutils are required. A login shell reads its startup
-# files in milliseconds; five seconds leaves ample room and still bounds a shell
-# that never answers.
-VERIFY_LIMIT=5
+# The bound for the fresh-shell check, in seconds, when FORGEL_CODE_TIMEOUT is
+# unset, and the grace period the checked shell gets between the graceful stop
+# and the forceful one. A login shell reads its startup files in milliseconds;
+# ten seconds leaves room on a slow machine and still bounds a shell that never
+# answers.
+DEFAULT_VERIFY_LIMIT=10
+VERIFY_GRACE=2
 
 # The profile files this installer can have written. ``--uninstall`` cleans the
 # block out of every one of them, so no stale PATH entry stays behind. The list
@@ -66,10 +75,17 @@ PROFILE_NAMES='.zshrc .zprofile .zshenv .bash_profile .bash_login .profile .bash
 # Set by ``verify_profile`` once the fresh shell resolved the launcher.
 VERIFIED_PATH=
 
+# What the bounded check owns while it runs: its private directory, the process
+# it started and the watchdog that bounds it. Every one of them is released by
+# ``cleanup_check``, whichever way the script ends.
+CHECK_DIR=
+CHECK_CHILD=
+CHECK_WATCHER=
+
 # Set by ``bounded_run``: the exit status of the checked command and what it
-# printed.
-BOUNDED_STATUS=0
-BOUNDED_OUTPUT=
+# printed. A status of 124 means the bound elapsed.
+CHECK_STATUS=0
+CHECK_OUTPUT=
 
 usage() {
     cat <<'USAGE'
@@ -290,7 +306,17 @@ print_block() {
     printf '%s\n' "$MARKER_END"
 }
 
-# Drop the marked block, if there is one. Every other line is kept as it was.
+# Whether the last byte of the file is a newline.
+ends_with_newline() {
+    [ -s "$1" ] || return 1
+    [ "$(tail -c 1 "$1" | wc -l | tr -d ' ')" = "1" ]
+}
+
+# Drop the marked block, if there is one. Every other line is kept byte for
+# byte, including whether the file ended with a newline: the rewrite carries
+# the last line without a terminator when the input had none. A block this
+# installer appended after a last line that had no final newline carries the
+# separator comment, and both go away, so uninstall restores the original.
 remove_profile_block() {
     profile=$1
     if [ ! -f "$profile" ]; then
@@ -304,11 +330,54 @@ remove_profile_block() {
         echo "install.sh: cannot write next to $profile" >&2
         return 1
     fi
-    if ! awk -v start="$MARKER_START" -v end="$MARKER_END" '
-            $0 == start { inside = 1; next }
-            inside == 1 && $0 == end { inside = 0; next }
-            inside == 1 { next }
-            { print }
+    final_newline=0
+    if ends_with_newline "$profile"; then
+        final_newline=1
+    fi
+    if ! awk -v start="$MARKER_START" -v end="$MARKER_END" \
+            -v separator="$MARKER_SEPARATOR" -v final_newline="$final_newline" '
+            { text[NR] = $0 }
+            END {
+                total = NR
+                kept = 0
+                inside = 0
+                block_end = 0
+                for (i = 1; i <= total; i++) {
+                    if (inside == 0 && text[i] == start) {
+                        inside = 1
+                        block_end = 0
+                        continue
+                    }
+                    if (inside == 1) {
+                        if (text[i] == end) {
+                            inside = 0
+                            block_end = i
+                        }
+                        continue
+                    }
+                    kept++
+                    kept_text[kept] = text[i]
+                    kept_index[kept] = i
+                }
+                restore_missing_newline = 0
+                if (block_end == total && kept > 0 && kept_text[kept] == separator) {
+                    kept--
+                    restore_missing_newline = 1
+                }
+                for (i = 1; i <= kept; i++) {
+                    terminate = 1
+                    if (i == kept && restore_missing_newline == 1) {
+                        terminate = 0
+                    } else if (i == kept && kept_index[i] == total && final_newline == 0) {
+                        terminate = 0
+                    }
+                    if (terminate) {
+                        printf "%s\n", kept_text[i]
+                    } else {
+                        printf "%s", kept_text[i]
+                    }
+                }
+            }
         ' "$profile" > "$tmp"; then
         rm -f "$tmp"
         echo "install.sh: cannot rewrite $profile" >&2
@@ -324,76 +393,234 @@ remove_profile_block() {
 
 # Exactly one block, whatever the profile already held. The previous block is
 # removed first and only then is the new one appended, so an interrupted run
-# leaves one block at most.
+# leaves one block at most. The append is byte-stable: a second run over the
+# same profile rewrites it to the same bytes, and a last line without a final
+# newline is recorded so the block can be dropped without leaving a newline
+# behind.
 add_profile_block() {
     profile=$1
     case $profile in
-        */*) mkdir -p "${profile%/*}" ;;
+        */*) mkdir -p "${profile%/*}" || return 1 ;;
     esac
     if ! remove_profile_block "$profile"; then
         return 1
     fi
-    if [ -s "$profile" ]; then
-        if [ "$(tail -c 1 "$profile" | wc -l | tr -d ' ')" = "0" ]; then
-            printf '\n' >> "$profile"
+    {
+        if [ -s "$profile" ] && ! ends_with_newline "$profile"; then
+            printf '\n'
+            printf '%s\n' "$MARKER_SEPARATOR"
         fi
-    fi
-    print_block >> "$profile"
+        print_block
+    } >> "$profile" || return 1
     return 0
 }
 
-# Run a command under a portable watchdog. ``timeout`` from GNU coreutils is not
-# required: the command runs in the background with stdin closed, a watcher
-# kills it when the bound elapses, and the caller returns as soon as the command
-# itself is done. The watcher holds no stream of the caller and exits by itself
-# once the command is gone; it is stopped before the function returns, so no
-# process is left behind. BOUNDED_STATUS is 124 when the watchdog had to kill
-# the command.
+# The bound in seconds: FORGEL_CODE_TIMEOUT when it is a positive integer, the
+# built-in default otherwise.
+verify_limit() {
+    configured=${FORGEL_CODE_TIMEOUT:-}
+    case $configured in
+        ''|*[!0-9]*)
+            printf '%s\n' "$DEFAULT_VERIFY_LIMIT"
+            return 0
+            ;;
+    esac
+    if [ "$configured" -lt 1 ]; then
+        printf '%s\n' "$DEFAULT_VERIFY_LIMIT"
+        return 0
+    fi
+    printf '%s\n' "$configured"
+}
+
+# An unpredictable name component, so the check directory cannot be guessed
+# and pre-created by another user.
+random_token() {
+    token=
+    if [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
+        token=$(od -An -N 8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || token=
+    fi
+    case $token in
+        ''|*[!0-9a-f]*) token= ;;
+    esac
+    if [ -z "$token" ]; then
+        token=$$$$$$
+    fi
+    printf '%s\n' "$token"
+}
+
+# A directory only the current user can enter or read, under the system
+# temporary directory, with a name nobody can predict.
+create_check_dir() {
+    parent=${TMPDIR:-/tmp}
+    if [ -z "$parent" ] || [ ! -d "$parent" ]; then
+        parent=/tmp
+    fi
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        candidate=$parent/forgel-code-check.$(random_token)
+        if (umask 077 && mkdir -m 700 "$candidate" 2>/dev/null); then
+            CHECK_DIR=$candidate
+            return 0
+        fi
+        attempt=$((attempt + 1))
+    done
+    echo "install.sh: cannot create a private directory under $parent" >&2
+    return 1
+}
+
+# The members of a process group, one pid per line.
+process_group() {
+    ps -A -o pid= -o pgid= 2>/dev/null | awk -v group="$1" '$2 == group { print $1 }'
+}
+
+# Every descendant of a process, one pid per line.
+process_tree() {
+    ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+        { parent[$1] = $2; ids[NR] = $1 }
+        END {
+            frontier[0] = root
+            count = 1
+            for (i = 0; i < count; i++) {
+                for (j = 1; j <= NR; j++) {
+                    pid = ids[j]
+                    if (parent[pid] == frontier[i] && !(pid in seen)) {
+                        seen[pid] = 1
+                        frontier[count] = pid
+                        count++
+                    }
+                }
+            }
+            for (i = 1; i < count; i++) print frontier[i]
+        }'
+}
+
+# Signal a process and every process it started. When the process leads its own
+# process group the whole group is signalled, so a shell that forked cannot
+# leave anything behind; otherwise the process tree is walked. The checked
+# command is started in the installer's own process group on purpose, so this
+# never signals the installer itself.
+signal_run() {
+    signal=$1
+    root=$2
+    if [ -z "$root" ]; then
+        return 0
+    fi
+    targets=
+    if command -v ps >/dev/null 2>&1; then
+        group=$(ps -o pgid= -p "$root" 2>/dev/null | tr -d ' ') || group=
+        own=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ') || own=
+        case $group in
+            ''|*[!0-9]*) group= ;;
+        esac
+        if [ -n "$group" ] && [ "$group" != "$own" ]; then
+            targets=$(process_group "$group")
+        fi
+    fi
+    if [ -z "$targets" ]; then
+        targets=$(process_tree "$root")
+    fi
+    for pid in $targets; do
+        kill -"$signal" "$pid" 2>/dev/null || true
+    done
+    kill -"$signal" "$root" 2>/dev/null || true
+    return 0
+}
+
+# Release everything the bounded check owns: the watchdog, the checked process
+# and its children, and the private directory. It is idempotent, so it can run
+# from the exit trap and again from a signal trap.
+cleanup_check() {
+    if [ -n "$CHECK_WATCHER" ]; then
+        kill -TERM "$CHECK_WATCHER" 2>/dev/null || true
+        wait "$CHECK_WATCHER" 2>/dev/null || true
+        CHECK_WATCHER=
+    fi
+    if [ -n "$CHECK_CHILD" ]; then
+        signal_run KILL "$CHECK_CHILD"
+        wait "$CHECK_CHILD" 2>/dev/null || true
+        CHECK_CHILD=
+    fi
+    if [ -n "$CHECK_DIR" ]; then
+        rm -rf "$CHECK_DIR" 2>/dev/null || true
+        CHECK_DIR=
+    fi
+    return 0
+}
+
+check_interrupted() {
+    cleanup_check
+    exit "$1"
+}
+
+# Run a command under a hard time bound. ``timeout`` from GNU coreutils is not
+# required and is not used: the command runs in the background, a watchdog
+# sends a graceful stop when the bound elapses and forcefully stops whatever
+# remains of the process tree after the grace period, and the caller returns
+# as soon as the command itself is done. Nothing the function starts survives
+# it. CHECK_STATUS is 124 when the bound elapsed.
+#
+# The checked command is deliberately *not* given its own process group here.
+# ``set -m`` makes the shell put the background job in a background process
+# group, and an interactive login shell in that position stops on its first
+# terminal access instead of answering, which is exactly the hang this check
+# must not have. The process tree walk in ``signal_run`` reaches everything the
+# shell forked without it.
 bounded_run() {
     limit=$1
     shift
-    stamp=${TMPDIR:-/tmp}/forgel-code-check.$$
-    out=$stamp.out
-    done_marker=$stamp.done
-    killed_marker=$stamp.killed
-    rm -f "$out" "$done_marker" "$killed_marker"
-    if ! : > "$out"; then
+    CHECK_STATUS=0
+    CHECK_OUTPUT=
+    if ! create_check_dir; then
         return 1
     fi
-    BOUNDED_STATUS=0
-    BOUNDED_OUTPUT=
+    out=$CHECK_DIR/output
+    timed_out=$CHECK_DIR/timed-out
+    saved_umask=$(umask)
+    umask 077
+    if ! : > "$out"; then
+        umask "$saved_umask"
+        cleanup_check
+        return 1
+    fi
     "$@" > "$out" 2>/dev/null < /dev/null &
-    child=$!
+    CHECK_CHILD=$!
+    umask "$saved_umask"
+    child=$CHECK_CHILD
     (
-        # The watcher keeps no stream of the caller: a descriptor it held open
-        # would outlive the command it guards.
-        exec >/dev/null 2>&1 < /dev/null
+        exec > /dev/null 2>&1 < /dev/null
         sleeper=
         trap 'kill "$sleeper" 2>/dev/null || true; exit 0' TERM
-        seconds=0
-        while [ "$seconds" -lt "$limit" ]; do
+        elapsed=0
+        while [ "$elapsed" -lt "$limit" ]; do
             sleep 1 &
             sleeper=$!
             wait "$sleeper" 2>/dev/null || true
             sleeper=
-            seconds=$((seconds + 1))
-            if [ -e "$done_marker" ] || ! kill -0 "$child" 2>/dev/null; then
+            elapsed=$((elapsed + 1))
+            if ! kill -0 "$child" 2>/dev/null; then
                 exit 0
             fi
         done
-        : > "$killed_marker" 2>/dev/null || true
-        kill -TERM "$child" 2>/dev/null || true
+        : > "$timed_out" 2>/dev/null || true
+        signal_run TERM "$child"
+        sleep "$VERIFY_GRACE" 2>/dev/null || true
+        signal_run KILL "$child"
     ) &
-    watcher=$!
-    wait "$child" || BOUNDED_STATUS=$?
-    : > "$done_marker"
-    kill -TERM "$watcher" 2>/dev/null || true
-    wait "$watcher" 2>/dev/null || true
-    BOUNDED_OUTPUT=$(sed -n 'p' "$out") || BOUNDED_OUTPUT=
-    if [ -e "$killed_marker" ]; then
-        BOUNDED_STATUS=124
+    CHECK_WATCHER=$!
+    wait "$child" || CHECK_STATUS=$?
+    CHECK_CHILD=
+    if [ -e "$timed_out" ]; then
+        # The watchdog still owns the graceful then the forceful stop; let it
+        # finish so nothing outlives the check.
+        wait "$CHECK_WATCHER" 2>/dev/null || true
+        CHECK_STATUS=124
+    else
+        kill -TERM "$CHECK_WATCHER" 2>/dev/null || true
+        wait "$CHECK_WATCHER" 2>/dev/null || true
     fi
-    rm -f "$out" "$done_marker" "$killed_marker"
+    CHECK_WATCHER=
+    CHECK_OUTPUT=$(cat "$out") || CHECK_OUTPUT=
+    cleanup_check
     return 0
 }
 
@@ -412,36 +639,50 @@ verification_failure() {
     profile=$2
     fresh_path=$3
     resolved=$4
+    status=$5
+    limit=$6
     echo "install.sh: the fresh login shell did not put forgel-code on PATH" >&2
+    case $status in
+        0) ;;
+        124) echo "install.sh: the check was stopped after ${limit}s; a timed-out or signalled check is a failure" >&2 ;;
+        start) echo "install.sh: the fresh login shell could not be started" >&2 ;;
+        *) echo "install.sh: the fresh login shell exited with status $status" >&2 ;;
+    esac
     echo "install.sh: login shell: $shell" >&2
     echo "install.sh: profile file: $profile" >&2
+    echo "install.sh: launcher: $LAUNCHER" >&2
     echo "install.sh: PATH block written:" >&2
     print_block >&2
     echo "install.sh: PATH in the fresh shell: ${fresh_path:-<empty>}" >&2
     echo "install.sh: forgel-code resolves to: ${resolved:-<not found>}" >&2
-    echo "install.sh: that shell does not read $profile when it starts a login session" >&2
+    echo "install.sh: check that $shell reads $profile when it starts a login session" >&2
     return 0
 }
 
 # Verify the block in a freshly started login interactive shell. The check
-# passes only when that shell resolves forgel-code to the launcher just written.
+# passes only when that shell answered in time, exited cleanly and resolved
+# ``forgel-code`` to the launcher just written, character for character.
 verify_profile() {
     shell=$1
     profile=$2
+    limit=$(verify_limit)
     report=
     resolved=
     fresh_path=
+    status=start
     if [ -n "$shell" ] && [ -x "$shell" ]; then
-        bounded_run "$VERIFY_LIMIT" env -i HOME="$HOME_DIR" SHELL="$shell" TERM=dumb PATH="$CHECK_PATH" "$shell" -l -i -c "$CHECK_COMMAND"
-        report=$BOUNDED_OUTPUT
-        fresh_path=$(report_path "$report")
-        resolved=$(report_resolved "$report")
+        if bounded_run "$limit" env -i HOME="$HOME_DIR" SHELL="$shell" TERM=dumb PATH="$CHECK_PATH" "$shell" -l -i -c "$CHECK_COMMAND"; then
+            status=$CHECK_STATUS
+            report=$CHECK_OUTPUT
+            fresh_path=$(report_path "$report")
+            resolved=$(report_resolved "$report")
+        fi
     fi
-    if [ "$resolved" = "$LAUNCHER" ]; then
+    if [ "$status" = "0" ] && [ -n "$resolved" ] && [ "$resolved" = "$LAUNCHER" ]; then
         VERIFIED_PATH=$resolved
         return 0
     fi
-    verification_failure "$shell" "$profile" "$fresh_path" "$resolved"
+    verification_failure "$shell" "$profile" "$fresh_path" "$resolved" "$status" "$limit"
     return 1
 }
 
@@ -590,5 +831,11 @@ main() {
             ;;
     esac
 }
+
+# Nothing this script started may outlive it, however it ends.
+trap 'cleanup_check' EXIT
+trap 'check_interrupted 129' HUP
+trap 'check_interrupted 130' INT
+trap 'check_interrupted 143' TERM
 
 main "$@"

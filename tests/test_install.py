@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,10 @@ INSTALL_SH = ROOT / "install.sh"
 # The markers the installer writes around its PATH block.
 MARKER_START = "# >>> forgel-code >>>"
 MARKER_END = "# <<< forgel-code <<<"
+
+# The comment the installer puts above a block it appended after a last line
+# that had no final newline, so that removal can restore the original bytes.
+MARKER_SEPARATOR = "# forgel-code: the line above had no final newline"
 
 # Shell profiles an install must not touch when the opt-out variable is set.
 PROFILE_NAMES = (
@@ -61,6 +66,9 @@ IGNORED = shutil.ignore_patterns(
 TIMEOUT = 600
 SCRIPT_NAMES = ("forgel-code", "forgel-code.exe", "forgel-code-script.py")
 
+# The prefix of the private directory the bounded check creates.
+CHECK_PREFIX = "forgel-code-check"
+
 # The stub for the macOS Directory Service call, exactly as the external
 # dependency records it. It answers ``dscl . -read <home> UserShell`` from
 # FORGEL_STUB_USER_SHELL, so the macOS branch is deterministic off macOS.
@@ -76,6 +84,18 @@ shell=${FORGEL_STUB_USER_SHELL:-/bin/zsh}
 printf 'UserShell: %s\\n' "$shell"
 """
 
+# The stand-in for GNU coreutils ``timeout``, exactly as the external dependency
+# records it: the utility is treated as unavailable and never runs COMMAND.
+TIMEOUT_STUB = """#!/bin/sh
+# Deterministic stand-in for GNU coreutils `timeout`.
+# Contract mirrored: timeout [OPTION] DURATION COMMAND [ARG]...
+# The utility is treated as unavailable, so COMMAND is never executed.
+echo 'timeout: utility unavailable in this environment' >&2
+exit 127
+"""
+
+# An invocation of GNU ``timeout`` or of its macOS name, never its mention.
+TIMEOUT_INVOCATION = re.compile(r"(?:^|[\s;&|(`\"'])g?timeout\s+(?:\d|--)")
 
 
 def _source_version() -> str:
@@ -183,6 +203,22 @@ def _write_dscl_stub(directory: Path) -> Path:
     stub.write_text(DSCL_STUB, encoding="utf-8")
     stub.chmod(0o755)
     return stub
+
+
+def _shell_quote(text) -> str:
+    """``text`` as a single-quoted POSIX shell word."""
+    return "'" + str(text).replace("'", "'\\''") + "'"
+
+
+def _process_exists(pid: int) -> bool:
+    """Whether a process with that pid is still running."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _shell_that_keeps_shell_unset(env) -> str | None:
@@ -776,6 +812,46 @@ def _hanging_shell(directory: Path) -> Path:
     return stub
 
 
+def _stubborn_shell(directory: Path, pid_file: Path) -> Path:
+    """A handled shell name that never answers and ignores the graceful stop.
+
+    It records its own pid first, so the test can prove the check left no
+    process behind once it returned.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "bash"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'printf "%%s\\n" "$$" > %s\n' % _shell_quote(pid_file)
+        + "trap '' TERM\n"
+        + "while :; do sleep 1; done\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _recording_login_shell(directory: Path, probe: Path, real_shell: str) -> Path:
+    """A handled shell name that records the check's directory, then runs ``real_shell``.
+
+    ``ls -ld`` output of every ``forgel-code-check.*`` entry goes into ``probe``,
+    so the test can inspect the permissions of a directory that no longer exists
+    by the time the installer returns. The entries sit in the temporary tree of
+    the test, next to the checked shell's own ``$HOME``.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "bash"
+    stub.write_text(
+        "#!/bin/sh\nprobe=%s\n" % _shell_quote(probe)
+        + 'ls -ld "$(dirname "$HOME")/tmp"/%s.* > "$probe/entries" 2>/dev/null || true\n'
+        % CHECK_PREFIX
+        + 'exec %s "$@"\n' % _shell_quote(real_shell),
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
 class InstallerWatchdogTest(InstallerCase):
     """The post-write check is bounded, so a hanging shell cannot hang it."""
 
@@ -792,6 +868,236 @@ class InstallerWatchdogTest(InstallerCase):
         self.assertLess(elapsed, 90, "the check did not honour its time bound")
         self.assertIn("did not put forgel-code on PATH", result.stderr)
         self.assertIn(str(profile), result.stderr)
+
+
+class InstallerBoundedCheckTest(InstallerCase):
+    """The bounded check stops the shell, stays private and leaves nothing."""
+
+    def isolation(self) -> dict:
+        """An environment whose check files land in a directory the test owns."""
+        tmp = self.base / "tmp"
+        tmp.mkdir(exist_ok=True)
+        env = dict(self.env)
+        env["TMPDIR"] = str(tmp)
+        return env
+
+    @staticmethod
+    def check_entries(tmp: Path):
+        """Every temporary entry the bounded check left under ``tmp``."""
+        return sorted(
+            path.name
+            for path in tmp.iterdir()
+            if path.name.startswith(CHECK_PREFIX)
+        )
+
+    def test_shell_that_ignores_the_stop_is_still_bounded(self) -> None:
+        """A shell that ignores the graceful stop is forcefully stopped in time."""
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        pid_file = self.base / "checked-shell.pid"
+        stub = _stubborn_shell(self.base / "stubs", pid_file)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["SHELL"] = str(stub)
+        env["FORGEL_CODE_TIMEOUT"] = "2"
+        profile = self.home / ".bash_profile"
+
+        started = time.monotonic()
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        elapsed = time.monotonic() - started
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertLess(elapsed, 60, "the check did not honour its time bound")
+        self.assertIn("stopped after 2s", result.stderr)
+        self.assertIn(str(profile), result.stderr)
+        self.assertIn("PATH in the fresh shell:", result.stderr)
+        self.assertIn("<empty>", result.stderr)
+        self.assertIn("<not found>", result.stderr)
+        self.assertNotIn("PATH block written", result.stdout)
+
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        self.assertFalse(
+            _process_exists(pid),
+            "the checked shell %d outlived the check" % pid,
+        )
+        self.assertEqual(
+            self.check_entries(tmp),
+            [],
+            "the timed-out check left temporary files behind",
+        )
+
+    def test_successful_check_leaves_no_temporary_entry(self) -> None:
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(
+            self.check_entries(tmp),
+            [],
+            "the successful check left temporary files behind",
+        )
+
+    def test_failed_check_leaves_no_temporary_entry(self) -> None:
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        env["FORGEL_CODE_PROFILE"] = str(self.home / ".ignored_profile")
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(
+            self.check_entries(tmp),
+            [],
+            "the failed check left temporary files behind",
+        )
+
+    def test_check_directory_is_owner_only_and_then_removed(self) -> None:
+        """The check writes into a private directory nobody else can read."""
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        probe = self.base / "probe"
+        probe.mkdir()
+        stub = _recording_login_shell(self.base / "stubs", probe, bash)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["SHELL"] = str(stub)
+
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        entries = (probe / "entries").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(entries, "the check created no directory to inspect")
+        for line in entries:
+            mode = line.split()[0]
+            # ``ls -ld`` appends one marker character after the ten permission
+            # characters when the entry carries extended attributes or an ACL,
+            # which macOS does for directories under its temporary tree. The
+            # permission field itself is always exactly ten characters wide.
+            self.assertEqual(
+                mode[:10],
+                "drwx------",
+                "the check directory is not owner-only: %s" % line,
+            )
+        self.assertEqual(
+            self.check_entries(tmp),
+            [],
+            "the private check directory stayed behind",
+        )
+
+
+class InstallerBoundedToolsTest(InstallerCase):
+    """The bound is shell-level: no GNU ``timeout`` and no other utility."""
+
+    def test_install_sh_never_invokes_gnu_timeout(self) -> None:
+        text = INSTALL_SH.read_text(encoding="utf-8")
+        self.assertNotIn("gtimeout", text)
+        for line in text.splitlines():
+            match = TIMEOUT_INVOCATION.search(line)
+            self.assertIsNone(
+                match,
+                "install.sh invokes a timeout utility: %s" % line,
+            )
+
+    def test_install_succeeds_with_a_failing_timeout_first_on_path(self) -> None:
+        """A missing ``timeout`` cannot break the install: it is never called."""
+        stubs = self.base / "stubs"
+        stubs.mkdir()
+        stand_in = stubs / "timeout"
+        stand_in.write_text(TIMEOUT_STUB, encoding="utf-8")
+        stand_in.chmod(0o755)
+        env = dict(self.env)
+        env["PATH"] = os.pathsep.join(
+            [str(stubs), env.get("PATH", "/usr/bin:/bin")]
+        )
+
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assert_installed()
+        self.assertEqual(_marker_count(self.profile), 1)
+
+
+class InstallerProfileByteStabilityTest(InstallerCase):
+    """A second install rewrites nothing and removal restores the original bytes."""
+
+    def install_twice_and_uninstall(self, original: bytes) -> None:
+        self.profile.write_bytes(original)
+
+        first = self.install()
+        self.assertEqual(
+            first.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (first.stdout, first.stderr),
+        )
+        after_first = self.profile.read_bytes()
+        self.assertIn(_guarded_line(self.bin_dir).encode(), after_first)
+        self.assertEqual(_marker_count(self.profile), 1)
+
+        second = self.install()
+        self.assertEqual(
+            second.returncode,
+            0,
+            "the second install.sh failed:\n%s\n%s"
+            % (second.stdout, second.stderr),
+        )
+        self.assertEqual(
+            self.profile.read_bytes(),
+            after_first,
+            "the second install changed the profile bytes",
+        )
+        self.assertEqual(_marker_count(self.profile), 1)
+
+        uninstalled = self.install("--uninstall")
+        self.assertEqual(
+            uninstalled.returncode,
+            0,
+            "uninstall failed:\n%s\n%s"
+            % (uninstalled.stdout, uninstalled.stderr),
+        )
+        self.assertEqual(
+            self.profile.read_bytes(),
+            original,
+            "the uninstall did not restore the original profile bytes",
+        )
+
+    def test_profile_with_a_final_newline_is_byte_stable(self) -> None:
+        self.install_twice_and_uninstall(
+            b"export EDITOR=vi\nexport PAGER=less\n"
+        )
+
+    def test_profile_without_a_final_newline_is_byte_stable(self) -> None:
+        self.install_twice_and_uninstall(b"export EDITOR=vi\nexport PAGER=less")
+
+    def test_repeated_install_does_not_accumulate_blank_lines(self) -> None:
+        original = b"export EDITOR=vi"
+        self.profile.write_bytes(original)
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        after_first = self.profile.read_bytes()
+        self.assertIn(
+            MARKER_SEPARATOR.encode(),
+            after_first,
+            "the block was not marked as following a line without a newline",
+        )
+        self.assertEqual(after_first.count(MARKER_SEPARATOR.encode()), 1)
+
+        second = self.install()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.profile.read_bytes(), after_first)
+        self.assertEqual(
+            self.profile.read_bytes().count(b"\n\n"),
+            after_first.count(b"\n\n"),
+            "the repeated install added a blank line",
+        )
 
 
 class InstallerOptOutTest(InstallerCase):
