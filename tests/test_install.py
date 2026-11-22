@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 import re
 import shutil
@@ -11,8 +10,6 @@ import sys
 import tempfile
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,12 +68,6 @@ SCRIPT_NAMES = ("forgel-code", "forgel-code.exe", "forgel-code-script.py")
 
 # The prefix of the private directory the bounded check creates.
 CHECK_PREFIX = "forgel-code-check"
-
-# The timing knobs the installer reads, set to values that make the bounded
-# check answer in a fraction of a second. The defaults are unchanged for a real
-# installation; the tests exercise the same code path with a finer poll.
-POLL_MS = "100"
-VERIFY_GRACE = "0"
 
 # A profile that already holds a comment, another tool's marked block, a blank
 # line and a setting: the bytes a re-install and an uninstall must give back.
@@ -143,8 +134,6 @@ def _clean_environment() -> dict:
         "FORGEL_CODE_NO_MODIFY_PATH",
         "FORGEL_CODE_NO_PROFILE_EDIT",
         "FORGEL_CODE_TIMEOUT",
-        "FORGEL_CODE_VERIFY_GRACE",
-        "FORGEL_CODE_POLL_MS",
         "FORGEL_STUB_MODE",
         "FORGEL_STUB_USER_SHELL",
         "PYTHONPATH",
@@ -168,14 +157,12 @@ def _candidate_pythons():
             yield found
 
 
-@lru_cache(maxsize=None)
 def _install_python() -> str:
     """A Python 3.9+ with pip, which is what the installer requires.
 
     The interpreter that runs the suite is not always the one that owns the
     client: a test runner installed for an older Python is a valid host for
-    these tests, and the installer refuses an interpreter that is too old. The
-    probe runs once per session: it answers the same question for every case.
+    these tests, and the installer refuses an interpreter that is too old.
     """
     for candidate in _candidate_pythons():
         try:
@@ -217,123 +204,8 @@ def _installer_environment(home: Path, **extra) -> dict:
     # The interpreter that owns pip here, so the test does not depend on which
     # python3 happens to be first on the developer's PATH.
     env["FORGEL_CODE_PYTHON"] = _install_python()
-    # The same bounded check, polled finer and stopped without a grace period,
-    # so a hanging shell is detected in a fraction of a second.
-    env["FORGEL_CODE_POLL_MS"] = POLL_MS
-    env["FORGEL_CODE_VERIFY_GRACE"] = VERIFY_GRACE
     env.update(extra)
     return env
-
-
-# Scenarios of one test class are prepared together and run side by side, so the
-# module pays for the slowest batch of real installs instead of the sum of all
-# of them. Each scenario keeps its own HOME, prefix, launcher directory and
-# profile, and every assertion about them is the one the test made before.
-_WORKERS = max(2, min(8, os.cpu_count() or 2))
-_POOL = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="forgel-install")
-atexit.register(_POOL.shutdown, True)
-
-
-@lru_cache(maxsize=1)
-def _shared_source() -> Path:
-    """One copy of the checkout, which every scenario installs from.
-
-    The build reads the checkout and writes only into its own temporary
-    directories, so one copy serves every test; a scenario links to it instead
-    of walking the whole tree again.
-    """
-    directory = Path(tempfile.mkdtemp(prefix="forgel-code-source-"))
-    atexit.register(shutil.rmtree, str(directory), True)
-    source = directory / "source"
-    shutil.copytree(ROOT, source, ignore=IGNORED)
-    return source
-
-
-class InstallerScenario:
-    """One prepared ``install.sh`` run, started in the background.
-
-    ``files`` are written into the scenario's tree before the run, ``env`` is
-    merged into the installer environment, ``pop`` removes variables from it,
-    and ``prepare`` receives the built scenario for anything the declarative
-    form cannot say: stub scripts, extra directories, another interpreter. A
-    prepare step that cannot run on this host marks the scenario unavailable.
-    """
-
-    def __init__(
-        self,
-        files=None,
-        env=None,
-        pop=(),
-        args=(),
-        prepare=None,
-        stdin=None,
-        interpreter="sh",
-    ) -> None:
-        self.base = Path(tempfile.mkdtemp(prefix="forgel-code-scenario-"))
-        atexit.register(shutil.rmtree, str(self.base), True)
-        self.source = self.base / "source"
-        self.source.symlink_to(_shared_source())
-        self.home = self.base / "home"
-        self.home.mkdir()
-        self.prefix = self.base / "prefix"
-        self.bin_dir = self.base / "bin"
-        self.profile = self.home / ".profile"
-        self.launcher = self.bin_dir / "forgel-code"
-        for name, content in (files or {}).items():
-            path = self.base / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(content, bytes):
-                path.write_bytes(content)
-            else:
-                path.write_text(content, encoding="utf-8")
-        self.args = tuple(args)
-        self.stdin = stdin
-        self.interpreter = interpreter
-        self.unavailable = False
-        self.env = _installer_environment(
-            self.home,
-            FORGEL_CODE_SOURCE=str(self.source),
-            FORGEL_CODE_HOME=str(self.prefix),
-            FORGEL_CODE_BIN=str(self.bin_dir),
-            FORGEL_CODE_PROFILE=str(self.profile),
-        )
-        for name in pop:
-            self.env.pop(name, None)
-        self.env.update(env or {})
-        if prepare is not None:
-            prepare(self)
-
-    def start(self) -> "InstallerScenario":
-        self.future = _POOL.submit(self._run)
-        return self
-
-    def _run(self) -> subprocess.CompletedProcess:
-        if self.stdin is None:
-            return _run(
-                [self.interpreter, str(INSTALL_SH), *self.args], self.base, self.env
-            )
-        return subprocess.run(
-            [self.interpreter],
-            cwd=str(self.base),
-            env=self.env,
-            input=self.stdin,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-        )
-
-
-def _scenario(prepare=None, **kwargs):
-    """A scenario builder a test class names in ``SCENARIOS``."""
-
-    def build():
-        scenario = InstallerScenario(prepare=prepare, **kwargs)
-        if scenario.unavailable:
-            shutil.rmtree(str(scenario.base), True)
-            return None
-        return scenario.start()
-
-    return build
 
 
 def _write_dscl_stub(directory: Path) -> Path:
@@ -475,74 +347,15 @@ def _marked_block(bin_dir: Path) -> str:
     )
 
 
-class _SharedClient:
-    """The checkout installed once into a temporary HOME for the whole module.
-
-    Several tests only read the state a successful install leaves behind: the
-    launcher, the installed metadata, the marked profile block, the launcher a
-    fresh login shell resolves. They share one real, offline install instead of
-    paying for another ``pip install``; every assertion about that state is the
-    same as before. A test that writes to the profile, the prefix or the
-    launcher keeps its own temporary tree.
-    """
-
-    def __init__(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="forgel-code-shared-")
-        atexit.register(shutil.rmtree, self.tmp, True)
-        self.base = Path(self.tmp)
-        self.source = self.base / "source"
-        self.source.symlink_to(_shared_source())
-        self.home = self.base / "home"
-        self.home.mkdir()
-        self.prefix = self.base / "prefix"
-        self.bin_dir = self.base / "bin"
-        self.profile = self.home / ".profile"
-        self.launcher = self.bin_dir / "forgel-code"
-        self.env = _installer_environment(
-            self.home,
-            FORGEL_CODE_SOURCE=str(self.source),
-            FORGEL_CODE_HOME=str(self.prefix),
-            FORGEL_CODE_BIN=str(self.bin_dir),
-            FORGEL_CODE_PROFILE=str(self.profile),
-        )
-        self.result = _run(["sh", str(INSTALL_SH)], self.base, self.env)
-
-
-@lru_cache(maxsize=1)
-def _shared_client() -> _SharedClient:
-    """The module-wide install, created on first use and kept until exit."""
-    return _SharedClient()
-
-
 class InstallerCase(unittest.TestCase):
-    """A temp HOME with the real installer run against a local source tree.
-
-    A class may name ``SCENARIOS``: those installer runs start together in
-    ``setUpClass`` and a test reads its own with ``claim``. The tree ``setUp``
-    builds stays available, so a test either claims a prepared run or drives
-    the installer itself.
-    """
-
-    SCENARIOS: dict = {}
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.scenarios = {}
-        for name, build in cls.SCENARIOS.items():
-            scenario = build()
-            if scenario is not None:
-                cls.scenarios[name] = scenario
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.scenarios = {}
+    """A temp HOME with the real installer run against a local source tree."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="forgel-code-installer-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.base = Path(self.tmp)
         self.source = self.base / "source"
-        self.source.symlink_to(_shared_source())
+        shutil.copytree(ROOT, self.source, ignore=IGNORED)
         self.home = self.base / "home"
         self.home.mkdir()
         self.prefix = self.base / "prefix"
@@ -556,49 +369,6 @@ class InstallerCase(unittest.TestCase):
             FORGEL_CODE_BIN=str(self.bin_dir),
             FORGEL_CODE_PROFILE=str(self.profile),
         )
-
-    def claim(self, name: str) -> subprocess.CompletedProcess:
-        """Bind this test to the prepared run ``name`` and return its result."""
-        scenario = type(self).scenarios[name]
-        for attribute in (
-            "base",
-            "source",
-            "home",
-            "prefix",
-            "bin_dir",
-            "profile",
-            "launcher",
-            "env",
-        ):
-            setattr(self, attribute, getattr(scenario, attribute))
-        return scenario.future.result()
-
-    def scenario(self, name: str) -> subprocess.CompletedProcess:
-        """Claim ``name``, skipping when this host cannot build it."""
-        if name not in type(self).scenarios:
-            self.skipTest(
-                "this host cannot run the %s scenario (its shell or tool is "
-                "not installed)" % name
-            )
-        return self.claim(name)
-
-    def shared_install(self) -> subprocess.CompletedProcess:
-        """Bind this test to the module-wide install and return its result.
-
-        Only tests that read the installed state without writing it use this;
-        the install they observe is a real run of ``install.sh``, just not one
-        repeated for every read-only assertion.
-        """
-        shared = _shared_client()
-        self.base = shared.base
-        self.source = shared.source
-        self.home = shared.home
-        self.prefix = shared.prefix
-        self.bin_dir = shared.bin_dir
-        self.profile = shared.profile
-        self.launcher = shared.launcher
-        self.env = shared.env
-        return shared.result
 
     def install(self, *args) -> subprocess.CompletedProcess:
         return _run(["sh", str(INSTALL_SH), *args], self.base, self.env)
@@ -621,31 +391,12 @@ class InstallerCase(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "forgel-code %s" % version)
 
 
-def _home_profile_override(name: str):
-    """A prepare step that points the install at another file in its HOME."""
-
-    def prepare(scenario: InstallerScenario) -> None:
-        scenario.env["FORGEL_CODE_PROFILE"] = str(scenario.home / name)
-
-    return prepare
-
-
 _INSTALL_SCRIPT = (ROOT / "install.sh").read_text(encoding="utf-8")
 _STDIN_TAIL = 'printf "forgel-stdin-tail-ok\\n"\n'
 
 
 class InstallerTest(InstallerCase):
     """One command installs the client, without network and without a venv."""
-
-    SCENARIOS = {
-        "ignored_profile": _scenario(prepare=_home_profile_override(".ignored_profile")),
-        "unread_profile": _scenario(prepare=_home_profile_override(".bashrc")),
-        "repeated": _scenario(),
-        "second_run": _scenario(),
-        "guard": _scenario(),
-        "piped": _scenario(stdin=_INSTALL_SCRIPT),
-        "piped_tail": _scenario(stdin=_INSTALL_SCRIPT + "\n" + _STDIN_TAIL),
-    }
 
     def test_script_is_executable_and_parses_with_sh(self) -> None:
         self.assertTrue(INSTALL_SH.is_file(), "no install.sh at the repository root")
@@ -656,7 +407,7 @@ class InstallerTest(InstallerCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_install_exits_zero_and_prints_the_version(self) -> None:
-        result = self.shared_install()
+        result = self.install()
         self.assertEqual(
             result.returncode,
             0,
@@ -665,18 +416,18 @@ class InstallerTest(InstallerCase):
         self.assertIn("forgel-code %s" % _source_version(), result.stdout)
 
     def test_install_creates_the_launcher_in_the_bin_directory(self) -> None:
-        result = self.shared_install()
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_installed()
 
     def test_launcher_prints_the_installed_version(self) -> None:
-        result = self.shared_install()
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_installed()
         self.assertEqual(_installed_version(self.prefix), _source_version())
 
     def test_profile_gets_one_marked_path_block(self) -> None:
-        result = self.shared_install()
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.profile.read_text(encoding="utf-8")
         self.assertEqual(_marker_count(self.profile), 1, text)
@@ -689,7 +440,7 @@ class InstallerTest(InstallerCase):
         )
 
     def test_install_reports_the_shell_profile_and_the_fresh_check(self) -> None:
-        result = self.shared_install()
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("/bin/sh", result.stdout)
         self.assertIn(str(self.profile), result.stdout)
@@ -700,7 +451,7 @@ class InstallerTest(InstallerCase):
 
     def test_login_shell_resolves_forgel_code_after_install(self) -> None:
         """A cleared, freshly started login shell finds the launcher unaided."""
-        result = self.shared_install()
+        result = self.install()
         self.assertEqual(
             result.returncode,
             0,
@@ -711,8 +462,10 @@ class InstallerTest(InstallerCase):
         )
 
     def test_failed_verification_reports_file_block_shell_and_path(self) -> None:
-        result = self.claim("ignored_profile")
         ignored = self.home / ".ignored_profile"
+        env = dict(self.env)
+        env["FORGEL_CODE_PROFILE"] = str(ignored)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(str(ignored), result.stderr)
         self.assertIn("login shell: /bin/sh", result.stderr)
@@ -725,8 +478,10 @@ class InstallerTest(InstallerCase):
 
     def test_profile_the_login_shell_ignores_fails_verification(self) -> None:
         """A block in a file the login shell never reads fails the check."""
-        result = self.claim("unread_profile")
         ignored = self.home / ".bashrc"
+        env = dict(self.env)
+        env["FORGEL_CODE_PROFILE"] = str(ignored)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertNotEqual(
             result.returncode,
             0,
@@ -745,7 +500,7 @@ class InstallerTest(InstallerCase):
         )
 
     def test_repeated_install_keeps_one_block_and_one_path_entry(self) -> None:
-        first = self.claim("repeated")
+        first = self.install()
         self.assertEqual(first.returncode, 0, first.stderr)
         block = self.profile.read_text(encoding="utf-8")
         self.assertEqual(block, _marked_block(self.bin_dir))
@@ -780,7 +535,7 @@ class InstallerTest(InstallerCase):
 
     def test_second_run_is_idempotent(self) -> None:
         """Running the installer again leaves the profile exactly as it was."""
-        first = self.claim("second_run")
+        first = self.install()
         self.assertEqual(
             first.returncode,
             0,
@@ -803,7 +558,7 @@ class InstallerTest(InstallerCase):
 
     def test_guard_keeps_one_entry_when_several_profiles_are_sourced(self) -> None:
         """Sourcing each profile that carries the block adds the entry once."""
-        result = self.claim("guard")
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         block = self.profile.read_text(encoding="utf-8")
         self.assertEqual(block, _marked_block(self.bin_dir))
@@ -838,7 +593,15 @@ class InstallerTest(InstallerCase):
 
     def test_piped_install_reads_the_script_from_stdin(self) -> None:
         """The documented ``curl ... | sh`` shape, with the script on stdin."""
-        result = self.claim("piped")
+        result = subprocess.run(
+            ["sh"],
+            cwd=str(self.base),
+            env=self.env,
+            input=_INSTALL_SCRIPT,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
         self.assertEqual(
             result.returncode,
             0,
@@ -852,7 +615,15 @@ class InstallerTest(InstallerCase):
 
     def test_piped_install_does_not_read_the_script_from_stdin(self) -> None:
         """The installer leaves the rest of stdin to the shell that read it."""
-        result = self.claim("piped_tail")
+        result = subprocess.run(
+            ["sh"],
+            cwd=str(self.base),
+            env=self.env,
+            input=_INSTALL_SCRIPT + "\n" + _STDIN_TAIL,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
         self.assertEqual(
             result.returncode,
             0,
@@ -875,62 +646,8 @@ class InstallerTest(InstallerCase):
         self.assertFalse(self.launcher.exists())
 
 
-def _detection_scenario(shell, files=None, unset=False):
-    """An install whose login shell comes from the account entry or ``$SHELL``."""
-
-    def build():
-        zsh = shutil.which("zsh") if shell == "zsh" else None
-        bash = shutil.which("bash") if shell == "bash" else None
-        if shell == "zsh" and not zsh:
-            return None
-        if shell == "bash" and not bash:
-            return None
-
-        def prepare(scenario: InstallerScenario) -> None:
-            scenario.env.pop("FORGEL_CODE_PROFILE", None)
-            if zsh:
-                stub_dir = scenario.base / "stubs"
-                _write_dscl_stub(stub_dir)
-                scenario.env["PATH"] = os.pathsep.join(
-                    [str(stub_dir), os.environ.get("PATH", "/usr/bin:/bin")]
-                )
-                scenario.env["FORGEL_STUB_USER_SHELL"] = zsh
-                scenario.env["SHELL"] = ""
-            elif bash:
-                # The installer starts the detected shell to verify the block,
-                # so $SHELL names the interpreter by its full path.
-                scenario.env["SHELL"] = bash
-            else:
-                scenario.env["SHELL"] = shell
-            if unset:
-                scenario.env.pop("SHELL", None)
-                interpreter = _shell_that_keeps_shell_unset(scenario.env)
-                if interpreter is None:
-                    scenario.unavailable = True
-                    return
-                scenario.interpreter = interpreter
-
-        scenario = InstallerScenario(files=files, prepare=prepare)
-        if scenario.unavailable:
-            shutil.rmtree(str(scenario.base), True)
-            return None
-        return scenario.start()
-
-    return build
-
-
 class InstallerShellDetectionTest(InstallerCase):
     """The edited profile follows the login shell, not $SHELL alone."""
-
-    SCENARIOS = {
-        "zsh": _detection_scenario("zsh"),
-        "zsh_unset": _detection_scenario("zsh", unset=True),
-        "bash_existing": _detection_scenario(
-            "bash", files={"home/.bash_profile": "export EDITOR=vi\n"}
-        ),
-        "bash_new": _detection_scenario("bash"),
-        "posix": _detection_scenario("/bin/sh"),
-    }
 
     def zsh(self) -> str:
         zsh = shutil.which("zsh")
@@ -938,9 +655,36 @@ class InstallerShellDetectionTest(InstallerCase):
             self.skipTest("zsh is not installed")
         return zsh
 
+    def bash(self) -> str:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        return bash
+
+    def zsh_environment(self, unset: bool = False):
+        """An environment whose login shell is only visible through ``dscl``."""
+        zsh = self.zsh()
+        stub_dir = self.base / "stubs"
+        _write_dscl_stub(stub_dir)
+        env = dict(self.env)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["PATH"] = os.pathsep.join(
+            [str(stub_dir), os.environ.get("PATH", "/usr/bin:/bin")]
+        )
+        env["FORGEL_STUB_USER_SHELL"] = zsh
+        env["SHELL"] = ""
+        if not unset:
+            return env, "sh"
+        env.pop("SHELL", None)
+        interpreter = _shell_that_keeps_shell_unset(env)
+        if interpreter is None:
+            self.skipTest("no installed shell leaves an unset SHELL unset")
+        return env, interpreter
+
     def test_zsh_without_shell_puts_the_block_in_zshrc(self) -> None:
         zsh = self.zsh()
-        result = self.scenario("zsh")
+        env, interpreter = self.zsh_environment()
+        result = _run([interpreter, str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
@@ -949,7 +693,8 @@ class InstallerShellDetectionTest(InstallerCase):
         zshrc = self.home / ".zshrc"
         self.assertTrue(
             zshrc.is_file(),
-            "no .zshrc in the temporary HOME; the installer said:\n%s\n%s\nhome: %s"
+            "no .zshrc in the temporary HOME; the installer said:\n%s\n%s\n"
+            "home: %s"
             % (
                 result.stdout,
                 result.stderr,
@@ -968,7 +713,8 @@ class InstallerShellDetectionTest(InstallerCase):
     def test_unset_shell_puts_the_block_in_zshrc(self) -> None:
         """Without $SHELL at all the account login shell still decides."""
         zsh = self.zsh()
-        result = self.scenario("zsh_unset")
+        env, interpreter = self.zsh_environment(unset=True)
+        result = _run([interpreter, str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
@@ -999,16 +745,18 @@ class InstallerShellDetectionTest(InstallerCase):
         self.assertEqual(_resolved_by(zsh, self.home), self.launcher.resolve())
 
     def test_bash_uses_an_existing_bash_profile(self) -> None:
-        bash = shutil.which("bash")
-        if not bash:
-            self.skipTest("bash is not installed")
-        result = self.scenario("bash_existing")
+        bash = self.bash()
+        profile = self.home / ".bash_profile"
+        profile.write_text("export EDITOR=vi\n", encoding="utf-8")
+        env = dict(self.env)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["SHELL"] = bash
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
             "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
         )
-        profile = self.home / ".bash_profile"
         text = profile.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("export EDITOR=vi\n"), text)
         self.assertEqual(_marker_count(profile), 1)
@@ -1020,10 +768,11 @@ class InstallerShellDetectionTest(InstallerCase):
         self.assertEqual(_resolved_by(bash, self.home), self.launcher.resolve())
 
     def test_bash_creates_a_bash_profile_when_none_exists(self) -> None:
-        bash = shutil.which("bash")
-        if not bash:
-            self.skipTest("bash is not installed")
-        result = self.scenario("bash_new")
+        bash = self.bash()
+        env = dict(self.env)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["SHELL"] = bash
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
@@ -1042,7 +791,7 @@ class InstallerShellDetectionTest(InstallerCase):
     def test_unknown_shell_writes_profile_and_warns(self) -> None:
         """A POSIX shell outside zsh and bash gets ~/.profile plus a warning."""
         posix_shell = "/bin/sh"
-        result = self.claim("posix")
+        result = self.install()
         self.assertEqual(
             result.returncode,
             0,
@@ -1133,52 +882,8 @@ class InstallerWatchdogTest(InstallerCase):
         self.assertIn(str(profile), result.stderr)
 
 
-def _failed_bounded_check(scenario: InstallerScenario) -> None:
-    scenario.env["FORGEL_CODE_PROFILE"] = str(scenario.home / ".ignored_profile")
-
-
-def _isolated(prepare=None):
-    """A builder for an install whose check files land in a ``tmp`` the test owns."""
-
-    def build():
-        def setup(scenario: InstallerScenario) -> None:
-            (scenario.base / "tmp").mkdir()
-            scenario.env["TMPDIR"] = str(scenario.base / "tmp")
-            if prepare is not None:
-                prepare(scenario)
-
-        return InstallerScenario(prepare=setup).start()
-
-    return build
-
-
-def _private_check_scenario():
-    def build():
-        scenario = InstallerScenario()
-        (scenario.base / "tmp").mkdir()
-        scenario.env["TMPDIR"] = str(scenario.base / "tmp")
-        bash = shutil.which("bash")
-        if not bash:
-            shutil.rmtree(str(scenario.base), True)
-            return None
-        probe = scenario.base / "probe"
-        probe.mkdir()
-        stub = _recording_login_shell(scenario.base / "stubs", probe, bash)
-        scenario.env.pop("FORGEL_CODE_PROFILE", None)
-        scenario.env["SHELL"] = str(stub)
-        return scenario.start()
-
-    return build
-
-
 class InstallerBoundedCheckTest(InstallerCase):
     """The bounded check stops the shell, stays private and leaves nothing."""
-
-    SCENARIOS = {
-        "successful": _isolated(),
-        "failed": _isolated(_failed_bounded_check),
-        "private": _private_check_scenario(),
-    }
 
     def isolation(self) -> dict:
         """An environment whose check files land in a directory the test owns."""
@@ -1233,8 +938,9 @@ class InstallerBoundedCheckTest(InstallerCase):
         )
 
     def test_successful_check_leaves_no_temporary_entry(self) -> None:
-        result = self.claim("successful")
-        tmp = Path(self.env["TMPDIR"])
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
@@ -1247,8 +953,10 @@ class InstallerBoundedCheckTest(InstallerCase):
         )
 
     def test_failed_check_leaves_no_temporary_entry(self) -> None:
-        result = self.claim("failed")
-        tmp = Path(self.env["TMPDIR"])
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        env["FORGEL_CODE_PROFILE"] = str(self.home / ".ignored_profile")
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertEqual(
             self.check_entries(tmp),
@@ -1258,16 +966,23 @@ class InstallerBoundedCheckTest(InstallerCase):
 
     def test_check_directory_is_owner_only_and_then_removed(self) -> None:
         """The check writes into a private directory nobody else can read."""
-        result = self.scenario("private")
-        tmp = Path(self.env["TMPDIR"])
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        probe = self.base / "probe"
+        probe.mkdir()
+        stub = _recording_login_shell(self.base / "stubs", probe, bash)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["SHELL"] = str(stub)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
             "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
         )
-        entries = (self.base / "probe" / "entries").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        entries = (probe / "entries").read_text(encoding="utf-8").splitlines()
         self.assertTrue(entries, "the check created no directory to inspect")
         for line in entries:
             mode = line.split()[0]
@@ -1325,19 +1040,9 @@ class InstallerBoundedToolsTest(InstallerCase):
 class InstallerProfileByteStabilityTest(InstallerCase):
     """A second install rewrites nothing and removal restores the original bytes."""
 
-    SCENARIOS = {
-        "final_newline": _scenario(
-            files={"home/.profile": b"export EDITOR=vi\nexport PAGER=less\n"}
-        ),
-        "no_final_newline": _scenario(
-            files={"home/.profile": b"export EDITOR=vi\nexport PAGER=less"}
-        ),
-        "rerun": _scenario(files={"home/.profile": RERUN_PROFILE}),
-        "blank_lines": _scenario(files={"home/.profile": b"export EDITOR=vi"}),
-    }
-
-    def install_twice_and_uninstall(self, name: str, original: bytes) -> None:
-        first = self.claim(name)
+    def install_twice_and_uninstall(self, original: bytes) -> None:
+        self.profile.write_bytes(original)
+        first = self.install()
         self.assertEqual(
             first.returncode,
             0,
@@ -1376,18 +1081,17 @@ class InstallerProfileByteStabilityTest(InstallerCase):
 
     def test_profile_with_a_final_newline_is_byte_stable(self) -> None:
         self.install_twice_and_uninstall(
-            "final_newline", b"export EDITOR=vi\nexport PAGER=less\n"
+            b"export EDITOR=vi\nexport PAGER=less\n"
         )
 
     def test_profile_without_a_final_newline_is_byte_stable(self) -> None:
-        self.install_twice_and_uninstall(
-            "no_final_newline", b"export EDITOR=vi\nexport PAGER=less"
-        )
+        self.install_twice_and_uninstall(b"export EDITOR=vi\nexport PAGER=less")
 
     def test_install_rerun_then_uninstall_preserves_profile(self) -> None:
         """Two installs and an uninstall keep every unrelated profile line."""
         original = RERUN_PROFILE
-        first = self.claim("rerun")
+        self.profile.write_bytes(original)
+        first = self.install()
         self.assertEqual(
             first.returncode,
             0,
@@ -1430,7 +1134,8 @@ class InstallerProfileByteStabilityTest(InstallerCase):
         self.assertNotIn(MARKER_END, text)
 
     def test_repeated_install_does_not_accumulate_blank_lines(self) -> None:
-        first = self.claim("blank_lines")
+        self.profile.write_bytes(b"export EDITOR=vi")
+        first = self.install()
         self.assertEqual(first.returncode, 0, first.stderr)
         after_first = self.profile.read_bytes()
         self.assertIn(
@@ -1567,11 +1272,6 @@ class InstallerBlockRemovalTest(InstallerCase):
 class InstallerOptOutTest(InstallerCase):
     """The opt-out variable keeps every profile file untouched."""
 
-    SCENARIOS = {
-        "opt_out": _scenario(env={"FORGEL_CODE_NO_MODIFY_PATH": "1"}),
-        "legacy": _scenario(env={"FORGEL_CODE_NO_PROFILE_EDIT": "1"}),
-    }
-
     def profiles(self):
         """Shell profile files in the temporary HOME, created or not."""
         return sorted(
@@ -1579,7 +1279,9 @@ class InstallerOptOutTest(InstallerCase):
         )
 
     def test_opt_out_leaves_the_profile_untouched(self) -> None:
-        result = self.claim("opt_out")
+        env = dict(self.env)
+        env["FORGEL_CODE_NO_MODIFY_PATH"] = "1"
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
             0,
@@ -1591,7 +1293,9 @@ class InstallerOptOutTest(InstallerCase):
         self.assertTrue(self.launcher.is_file())
 
     def test_opt_out_writes_nothing_outside_the_target_directories(self) -> None:
-        result = self.claim("opt_out")
+        env = dict(self.env)
+        env["FORGEL_CODE_NO_MODIFY_PATH"] = "1"
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.profiles(), [], "a shell profile was written")
         self.assertEqual(
@@ -1606,7 +1310,9 @@ class InstallerOptOutTest(InstallerCase):
             )
 
     def test_legacy_opt_out_name_is_honoured_too(self) -> None:
-        result = self.claim("legacy")
+        env = dict(self.env)
+        env["FORGEL_CODE_NO_PROFILE_EDIT"] = "1"
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.profile.exists())
         self.assertIn(_unguarded_line(self.bin_dir), result.stdout)
@@ -1615,13 +1321,8 @@ class InstallerOptOutTest(InstallerCase):
 class InstallerUninstallTest(InstallerCase):
     """``--uninstall`` removes the installation and the block it added."""
 
-    SCENARIOS = {
-        "installs": _scenario(),
-        "keeps_profile": _scenario(files={"home/.profile": "export EDITOR=vi\n"}),
-    }
-
     def test_uninstall_removes_everything(self) -> None:
-        installed = self.claim("installs")
+        installed = self.install()
         self.assertEqual(installed.returncode, 0, installed.stderr)
         self.assertTrue(self.launcher.is_file())
         self.assertEqual(_marker_count(self.profile), 1)
@@ -1638,7 +1339,8 @@ class InstallerUninstallTest(InstallerCase):
         self.assertNotIn(MARKER_END, self.profile.read_text(encoding="utf-8"))
 
     def test_uninstall_keeps_the_rest_of_the_profile(self) -> None:
-        installed = self.claim("keeps_profile")
+        self.profile.write_text("export EDITOR=vi\n", encoding="utf-8")
+        installed = self.install()
         self.assertEqual(installed.returncode, 0, installed.stderr)
         result = self.install("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1737,15 +1439,6 @@ class InstallerUninstallTest(InstallerCase):
 class InstallerProfileOverrideUninstallTest(InstallerCase):
     """``--uninstall`` also cleans the profile ``FORGEL_CODE_PROFILE`` names."""
 
-    SCENARIOS = {
-        "override_installed": _scenario(files={"home/.profile": "# keep\n"}),
-        "failed_install": _scenario(
-            prepare=lambda scenario: scenario.env.__setitem__(
-                "FORGEL_CODE_PROFILE", str(scenario.home / "custom_profile")
-            )
-        ),
-    }
-
     def custom_profile(self) -> Path:
         return self.home / "custom_profile"
 
@@ -1780,7 +1473,8 @@ class InstallerProfileOverrideUninstallTest(InstallerCase):
     def test_uninstall_removes_the_block_of_an_override_that_installed(self) -> None:
         # ``/bin/sh`` reads ``$HOME/.profile``, so an override naming it installs
         # cleanly and the block it wrote is the one the uninstall must remove.
-        installed = self.claim("override_installed")
+        self.profile.write_text("# keep\n", encoding="utf-8")
+        installed = self.install()
         self.assertEqual(
             installed.returncode,
             0,
@@ -1796,8 +1490,10 @@ class InstallerProfileOverrideUninstallTest(InstallerCase):
         self.assertEqual(_marker_count(self.profile), 0)
 
     def test_uninstall_removes_the_block_a_failed_install_left(self) -> None:
-        failed = self.claim("failed_install")
         profile = self.custom_profile()
+        env = dict(self.env)
+        env["FORGEL_CODE_PROFILE"] = str(profile)
+        failed = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertNotEqual(failed.returncode, 0, failed.stdout)
         self.assertEqual(_marker_count(profile), 1)
 

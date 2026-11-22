@@ -28,10 +28,6 @@
 #   FORGEL_CODE_NO_MODIFY_PATH  set to leave the shell profile untouched
 #   FORGEL_CODE_NO_PROFILE_EDIT the same opt-out under its older name
 #   FORGEL_CODE_TIMEOUT         seconds the fresh-shell check may take (default: 10)
-#   FORGEL_CODE_VERIFY_GRACE    seconds between the graceful stop and the
-#                               forceful one when the bound elapses (default: 2)
-#   FORGEL_CODE_POLL_MS         how often, in milliseconds, the watchdog looks
-#                               at the checked process (default: 1000)
 #
 # The script is POSIX ``sh`` and safe to pipe into: it never reads stdin.
 
@@ -62,13 +58,12 @@ CHECK_PATH=/usr/bin:/bin
 CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forgel-code || true); printf "forgel-fresh-resolved=%s\n" "$fresh"'
 
 # The bound for the fresh-shell check, in seconds, when FORGEL_CODE_TIMEOUT is
-# unset, the grace period the checked shell gets between the graceful stop and
-# the forceful one, and the watchdog's poll interval in milliseconds. A login
-# shell reads its startup files in milliseconds; ten seconds leaves room on a
-# slow machine and still bounds a shell that never answers.
+# unset, and the grace period the checked shell gets between the graceful stop
+# and the forceful one. A login shell reads its startup files in milliseconds;
+# ten seconds leaves room on a slow machine and still bounds a shell that never
+# answers.
 DEFAULT_VERIFY_LIMIT=10
 VERIFY_GRACE=2
-VERIFY_POLL_MS=1000
 
 # The profile files this installer can have written. ``--uninstall`` cleans the
 # block out of every one of them, so no stale PATH entry stays behind. The list
@@ -464,38 +459,6 @@ verify_limit() {
     printf '%s\n' "$configured"
 }
 
-# The grace period in seconds between the graceful stop and the forceful one:
-# FORGEL_CODE_VERIFY_GRACE when it is a non-negative integer, the built-in
-# default otherwise. Zero is allowed and stops forcefully at once.
-verify_grace() {
-    configured=${FORGEL_CODE_VERIFY_GRACE:-}
-    case $configured in
-        ''|*[!0-9]*)
-            printf '%s\n' "$VERIFY_GRACE"
-            return 0
-            ;;
-    esac
-    printf '%s\n' "$configured"
-}
-
-# The watchdog's poll interval in milliseconds: FORGEL_CODE_POLL_MS when it is a
-# positive integer, one second otherwise. The default is a whole second, so the
-# default path asks nothing of ``sleep`` beyond POSIX.
-verify_poll() {
-    configured=${FORGEL_CODE_POLL_MS:-}
-    case $configured in
-        ''|*[!0-9]*)
-            printf '%s\n' "$VERIFY_POLL_MS"
-            return 0
-            ;;
-    esac
-    if [ "$configured" -lt 1 ]; then
-        printf '%s\n' "$VERIFY_POLL_MS"
-        return 0
-    fi
-    printf '%s\n' "$configured"
-}
-
 # An unpredictable name component, so the check directory cannot be guessed
 # and pre-created by another user.
 random_token() {
@@ -632,8 +595,6 @@ check_interrupted() {
 bounded_run() {
     limit=$1
     shift
-    grace=$(verify_grace)
-    poll=$(verify_poll)
     CHECK_STATUS=0
     CHECK_OUTPUT=
     if ! create_check_dir; then
@@ -656,35 +617,20 @@ bounded_run() {
         exec > /dev/null 2>&1 < /dev/null
         sleeper=
         trap 'kill "$sleeper" 2>/dev/null || true; exit 0' TERM
-        # A partial second poll only works where ``sleep`` understands one; fall
-        # back to whole seconds so the bound never elapses early.
-        if [ $((poll % 1000)) -ne 0 ] && ! sleep 0.001 2>/dev/null; then
-            poll=1000
-        fi
-        limit_ms=$((limit * 1000))
-        elapsed_ms=0
-        while [ "$elapsed_ms" -lt "$limit_ms" ]; do
-            pause=$poll
-            remaining=$((limit_ms - elapsed_ms))
-            if [ "$pause" -gt "$remaining" ]; then
-                pause=$remaining
-            fi
-            delay=$((pause / 1000))
-            if [ $((pause % 1000)) -ne 0 ]; then
-                delay=$(printf '%d.%03d' "$delay" $((pause % 1000)))
-            fi
-            sleep "$delay" &
+        elapsed=0
+        while [ "$elapsed" -lt "$limit" ]; do
+            sleep 1 &
             sleeper=$!
             wait "$sleeper" 2>/dev/null || true
             sleeper=
-            elapsed_ms=$((elapsed_ms + pause))
+            elapsed=$((elapsed + 1))
             if ! kill -0 "$child" 2>/dev/null; then
                 exit 0
             fi
         done
         : > "$timed_out" 2>/dev/null || true
         signal_run TERM "$child"
-        sleep "$grace" 2>/dev/null || true
+        sleep "$VERIFY_GRACE" 2>/dev/null || true
         signal_run KILL "$child"
     ) &
     CHECK_WATCHER=$!
@@ -815,14 +761,9 @@ install_client() {
         echo "install.sh: $PYTHON is older than Python 3.9 or cannot run" >&2
         return 1
     fi
-    # Looking pip up by name is answerable without importing it, which costs a
-    # fraction of the import. Only an interpreter that cannot even name the
-    # module pays for the import that tells us whether it works.
-    if ! "$PYTHON" -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("pip") is not None else 1)' >/dev/null 2>&1; then
-        if ! "$PYTHON" -c 'import pip' >/dev/null 2>&1; then
-            echo "install.sh: $PYTHON has no pip module; install pip and try again" >&2
-            return 1
-        fi
+    if ! "$PYTHON" -c 'import pip' >/dev/null 2>&1; then
+        echo "install.sh: $PYTHON has no pip module; install pip and try again" >&2
+        return 1
     fi
     if ! SOURCE=$(resolve_source); then
         return 1
