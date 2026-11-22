@@ -581,6 +581,128 @@ class InstallerUninstallTest(InstallerCase):
             )
 
 
+class InstallerProfileOverrideUninstallTest(InstallerCase):
+    """``--uninstall`` also cleans the profile ``FORGEL_CODE_PROFILE`` names."""
+
+    def custom_profile(self) -> Path:
+        return self.home / "custom_profile"
+
+    def write_block(self, profile: Path) -> None:
+        profile.write_text(
+            "# keep-before\n"
+            "%s\n"
+            'export PATH="%s:$PATH"\n'
+            "%s\n"
+            "# keep-after\n" % (MARKER_START, self.bin_dir, MARKER_END),
+            encoding="utf-8",
+        )
+
+    def uninstall(self, **extra) -> subprocess.CompletedProcess:
+        env = dict(self.env)
+        env.update({name: str(value) for name, value in extra.items()})
+        return _run(["sh", str(INSTALL_SH), "--uninstall"], self.base, env)
+
+    def test_uninstall_removes_the_block_from_the_override_profile(self) -> None:
+        profile = self.custom_profile()
+        self.write_block(profile)
+        result = self.uninstall(FORGEL_CODE_PROFILE=profile)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "uninstall failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(
+            profile.read_text(encoding="utf-8"),
+            "# keep-before\n# keep-after\n",
+        )
+        self.assertIn("Removed the PATH block from %s" % profile, result.stdout)
+
+    def test_uninstall_removes_the_block_of_an_override_that_installed(self) -> None:
+        # ``/bin/sh`` reads ``$HOME/.profile``, so an override naming it installs
+        # cleanly and the block it wrote is the one the uninstall must remove.
+        self.profile.write_text("# keep\n", encoding="utf-8")
+        installed = self.install()
+        self.assertEqual(
+            installed.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (installed.stdout, installed.stderr),
+        )
+        self.assertEqual(_marker_count(self.profile), 1)
+
+        result = self.uninstall()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.profile.read_text(encoding="utf-8").rstrip("\n"), "# keep"
+        )
+        self.assertEqual(_marker_count(self.profile), 0)
+
+    def test_uninstall_removes_the_block_a_failed_install_left(self) -> None:
+        profile = self.custom_profile()
+        env = dict(self.env)
+        env["FORGEL_CODE_PROFILE"] = str(profile)
+        failed = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertEqual(_marker_count(profile), 1)
+
+        result = self.uninstall(FORGEL_CODE_PROFILE=profile)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "uninstall failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(_marker_count(profile), 0)
+        self.assertNotIn(MARKER_END, profile.read_text(encoding="utf-8"))
+
+    def test_uninstall_without_the_override_cleans_the_standard_profile(self) -> None:
+        self.write_block(self.profile)
+        env = {
+            name: value
+            for name, value in self.env.items()
+            if name != "FORGEL_CODE_PROFILE"
+        }
+        result = _run(["sh", str(INSTALL_SH), "--uninstall"], self.base, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.profile.read_text(encoding="utf-8"),
+            "# keep-before\n# keep-after\n",
+        )
+
+    def test_uninstall_tolerates_a_missing_override_profile(self) -> None:
+        absent = self.home / "absent_profile"
+        result = self.uninstall(FORGEL_CODE_PROFILE=absent)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(absent.exists(), "the uninstall created the override file")
+
+    def test_uninstall_leaves_a_marker_free_override_profile_alone(self) -> None:
+        profile = self.custom_profile()
+        profile.write_text("no markers here\n", encoding="utf-8")
+        result = self.uninstall(FORGEL_CODE_PROFILE=profile)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(profile.read_text(encoding="utf-8"), "no markers here\n")
+
+    def test_override_naming_a_standard_profile_is_cleaned_once(self) -> None:
+        self.profile.write_text(
+            "# keep\n"
+            "%s\n"
+            'export PATH="%s:$PATH"\n'
+            "%s\n"
+            "# tail\n" % (MARKER_START, self.bin_dir, MARKER_END),
+            encoding="utf-8",
+        )
+        result = self.uninstall(FORGEL_CODE_PROFILE=self.profile)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "uninstall failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(self.profile.read_text(encoding="utf-8"), "# keep\n# tail\n")
+        self.assertEqual(
+            result.stdout.count("Removed the PATH block from %s" % self.profile),
+            1,
+            result.stdout,
+        )
+
+
 class PlainPipInstallTest(unittest.TestCase):
     """A plain, offline ``python3 -m pip install`` of the local source tree."""
 

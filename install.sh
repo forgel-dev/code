@@ -407,6 +407,20 @@ install_client() {
     add_path
 }
 
+# Clean the marked block out of one profile file, reporting it only when the
+# file really carried one.
+uninstall_profile() {
+    profile=$1
+    if [ ! -f "$profile" ] || ! grep -Fq "$MARKER_START" "$profile"; then
+        return 0
+    fi
+    if remove_profile_block "$profile"; then
+        echo "Removed the PATH block from $profile"
+        return 0
+    fi
+    return 1
+}
+
 uninstall() {
     status=0
     if [ -d "$PREFIX" ]; then
@@ -426,16 +440,19 @@ uninstall() {
         fi
     fi
     for name in $PROFILE_NAMES; do
-        profile=$HOME_DIR/$name
-        if [ ! -f "$profile" ] || ! grep -Fq "$MARKER_START" "$profile"; then
-            continue
-        fi
-        if remove_profile_block "$profile"; then
-            echo "Removed the PATH block from $profile"
-        else
+        if ! uninstall_profile "$HOME_DIR/$name"; then
             status=1
         fi
     done
+    # An install may have written the block into the profile named by
+    # FORGEL_CODE_PROFILE instead of one of the standard names, and a run that
+    # failed its fresh-shell check leaves the block behind. Clean that path too;
+    # it is a no-op when it names a file the loop above already cleaned.
+    if [ -n "${FORGEL_CODE_PROFILE:-}" ]; then
+        if ! uninstall_profile "$FORGEL_CODE_PROFILE"; then
+            status=1
+        fi
+    fi
     if [ "$status" = "0" ]; then
         echo "Forgel Code is uninstalled."
     fi

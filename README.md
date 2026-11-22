@@ -57,7 +57,7 @@ Editable installs are not supported: the backend implements only the
 | --- | --- |
 | `FORGEL_CODE_HOME` | installation prefix (default `~/.local/share/forgel-code`) |
 | `FORGEL_CODE_BIN` | directory of the `forgel-code` launcher (default `~/.local/bin`) |
-| `FORGEL_CODE_PROFILE` | shell profile that receives the `PATH` block, instead of the detected one |
+| `FORGEL_CODE_PROFILE` | shell profile that receives the `PATH` block, instead of the detected one; the uninstall cleans it too |
 | `FORGEL_CODE_NO_MODIFY_PATH` | set it to leave the shell profile untouched |
 | `FORGEL_CODE_SOURCE` | install from a local checkout instead of the network |
 
@@ -91,7 +91,12 @@ curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh |
 The uninstall removes the installation prefix, the `forgel-code` launcher and
 the marked `PATH` block from every profile file this installer can have written:
 `~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bash_login` and
-`~/.profile`. The rest of each of those files is left unchanged.
+`~/.profile`. When `FORGEL_CODE_PROFILE` names another file, the same run also
+removes the marked block from that exact file, so a block left behind by an
+install that edited a custom profile — including an install that wrote the block
+and then failed its fresh-shell check — does not survive. A file that is missing
+or carries no marker is left alone and no file is created. The rest of each
+edited file is left unchanged.
 
 Windows is not the main installation method; the fallback there is `python -m pip install --user` of the pinned revision.
 
