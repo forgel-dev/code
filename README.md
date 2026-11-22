@@ -28,23 +28,31 @@ replaces the installation instead of duplicating anything.
 | --- | --- |
 | zsh | `~/.zshrc` |
 | bash | the first existing of `~/.bash_profile`, `~/.bash_login`, `~/.profile`; `~/.bash_profile` is created when none of them exists |
-| other POSIX `sh` | `~/.profile` |
+| other POSIX `sh` | `~/.profile`, with a warning on stderr that names the file and the detected shell |
 
 The login shell comes from `$SHELL`. When that is unset, empty or names a shell
-the installer does not handle, it reads the account login shell — the macOS
-Directory Service entry, otherwise the passwd entry — and only then falls back
-to `~/.profile`. The block is never written to `~/.bashrc` alone, because a login
-bash shell does not read that file. A profile file that does not exist yet is
-created.
+the installer does not handle, it reads the shell of the invoking process and
+then the account login shell — the macOS Directory Service entry, otherwise the
+passwd entry — and only then falls back to `~/.profile`. The block is never
+written to `~/.bashrc` alone, because a login bash shell does not read that
+file. A profile file that does not exist yet is created.
+
+The block carries a `case "$PATH:"` guard and prepends the launcher directory
+only when it is not already there, so sourcing it again, or sourcing several
+profiles that carry it, leaves exactly one entry. There is no unguarded
+`export PATH=...` line.
 
 After writing the block the installer checks it: it starts the detected login
-shell as a login interactive shell from a cleared environment and requires
-`command -v forgel-code` to resolve to the launcher it just wrote. On success it
-prints the detected shell, the edited profile file and the path that fresh shell
-resolved. If the check fails it exits non-zero and prints the edited profile
-file, the block it wrote and the `PATH` the fresh shell saw, so a profile your
-login shell never reads is never reported as active. Re-running keeps exactly
-one marked block and leaves the rest of the file as it was.
+shell as a login interactive shell from a cleared environment, under a bounded
+time limit enforced without GNU `timeout`, and requires `command -v forgel-code`
+to resolve to the launcher it just wrote. On success it prints the detected
+shell, the edited profile file and the path that fresh shell resolved. If the
+check fails, or the shell does not answer within the limit, it exits non-zero
+and prints on stderr the edited profile file, the exact block it wrote, the
+shell it checked, the `PATH` that shell saw and what `forgel-code` resolved to,
+so a profile your login shell never reads is never reported as active.
+Re-running keeps exactly one marked block and leaves the rest of the file as it
+was.
 
 The client has no dependencies and builds through the small in-tree PEP 517
 backend (`_build_backend.py`), so the installer never needs a package index.
@@ -61,8 +69,9 @@ Editable installs are not supported: the backend implements only the
 | `FORGEL_CODE_NO_MODIFY_PATH` | set it to leave the shell profile untouched |
 | `FORGEL_CODE_SOURCE` | install from a local checkout instead of the network |
 
-With `FORGEL_CODE_NO_MODIFY_PATH=1` no profile file is opened for writing; the
-installer prints the exact line to add yourself and exits with code 0.
+With `FORGEL_CODE_NO_MODIFY_PATH=1` no profile file is opened for writing, no
+fresh-shell check runs, the installer prints the exact line to add yourself and
+exits with code 0.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,13 +99,13 @@ curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh |
 
 The uninstall removes the installation prefix, the `forgel-code` launcher and
 the marked `PATH` block from every profile file this installer can have written:
-`~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bash_login` and
-`~/.profile`. When `FORGEL_CODE_PROFILE` names another file, the same run also
-removes the marked block from that exact file, so a block left behind by an
-install that edited a custom profile — including an install that wrote the block
-and then failed its fresh-shell check — does not survive. A file that is missing
-or carries no marker is left alone and no file is created. The rest of each
-edited file is left unchanged.
+`~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bash_login`,
+`~/.profile` and `~/.bashrc`. When `FORGEL_CODE_PROFILE` names another file, the
+same run also removes the marked block from that exact file, so a block left
+behind by an install that edited a custom profile — including an install that
+wrote the block and then failed its fresh-shell check — does not survive. A file
+that is missing or carries no marker is left alone, no file is created, and the
+rest of each edited file is left unchanged.
 
 Windows is not the main installation method; the fallback there is `python -m pip install --user` of the pinned revision.
 

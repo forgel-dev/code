@@ -7,13 +7,15 @@
 #
 # The client goes into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}, the
 # ``forgel-code`` launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, and that
-# directory is put on PATH through one marked block in the profile the login
-# shell reads. The login shell is taken from $SHELL; when that is unset, empty or
-# names a shell this installer does not handle, the account login shell decides.
-# After writing the block the installer starts that shell as a login interactive
-# shell from a cleared environment and checks that ``forgel-code`` resolves to
-# the launcher it just wrote. Re-running replaces the installation; running with
-# ``--uninstall`` removes it again.
+# directory is put on PATH through one marked block in the profile an
+# interactive login session of the login shell reads. The login shell is taken
+# from $SHELL, then from the invoking process (ps), then from the account login
+# shell; a shell outside the zsh and bash families gets the block in
+# $HOME/.profile and a warning that names the edited file. After writing the
+# block the installer starts that shell as a login interactive shell from a
+# cleared environment, under a bounded time limit, and checks that
+# ``forgel-code`` resolves to the launcher it just wrote. Re-running replaces the
+# installation; running with ``--uninstall`` removes it again.
 #
 # Environment variables:
 #   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
@@ -47,6 +49,13 @@ REPOSITORY=${FORGEL_CODE_REPOSITORY:-https://github.com/forgel-dev/code}
 CHECK_PATH=/usr/bin:/bin
 CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forgel-code || true); printf "forgel-fresh-resolved=%s\n" "$fresh"'
 
+# The bound for the fresh-shell check, in seconds. It is an internal constant,
+# not a documented environment variable, and it is enforced by a portable
+# watchdog so no GNU coreutils are required. A login shell reads its startup
+# files in milliseconds; five seconds leaves ample room and still bounds a shell
+# that never answers.
+VERIFY_LIMIT=5
+
 # The profile files this installer can have written. ``--uninstall`` cleans the
 # block out of every one of them, so no stale PATH entry stays behind. The list
 # is a superset of what the install path may edit, including ~/.bashrc, because
@@ -57,6 +66,11 @@ PROFILE_NAMES='.zshrc .zprofile .zshenv .bash_profile .bash_login .profile .bash
 # Set by ``verify_profile`` once the fresh shell resolved the launcher.
 VERIFIED_PATH=
 
+# Set by ``bounded_run``: the exit status of the checked command and what it
+# printed.
+BOUNDED_STATUS=0
+BOUNDED_OUTPUT=
+
 usage() {
     cat <<'USAGE'
 Usage: install.sh [--uninstall] [--help]
@@ -64,7 +78,8 @@ Usage: install.sh [--uninstall] [--help]
 Installs the Forgel Code client into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}
 and its launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, adding that directory
 to PATH with one marked block in the profile the login shell reads. The result
-is checked in a freshly started login interactive shell.
+is checked in a freshly started login interactive shell under a bounded time
+limit.
 
   --uninstall   remove the installation, the launcher and the PATH block
   --help        show this text
@@ -168,12 +183,43 @@ is_handled_shell() {
     return 1
 }
 
+# The shell of the invoking process, read with ps. A piped run often has no
+# useful $SHELL but a meaningful parent shell. Prints nothing when that process
+# is not a shell this installer handles or cannot be resolved.
+parent_login_shell() {
+    if ! command -v ps >/dev/null 2>&1; then
+        return 1
+    fi
+    pid=${PPID:-}
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    found=$(ps -p "$pid" -o comm= 2>/dev/null) || found=
+    found=${found%%[[:space:]]*}
+    # A login shell often reports itself as ``-zsh``.
+    found=${found#-}
+    if [ -z "$found" ] || ! is_handled_shell "$found"; then
+        return 1
+    fi
+    if ! resolved=$(command -v "$found" 2>/dev/null) || [ -z "$resolved" ]; then
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
+
 # The shell that reads the edited profile for an interactive login session.
-# $SHELL decides when it names a shell we handle; otherwise the account login
-# shell decides, and a POSIX ``sh`` is the last resort, which reads $HOME/.profile.
+# $SHELL decides when it names a shell we handle; otherwise the invoking process
+# and then the account login shell decide, and a POSIX ``sh`` is the last
+# resort, which reads $HOME/.profile. An empty $SHELL never decides for bash by
+# itself.
 detect_login_shell() {
     candidate=${SHELL:-}
     if [ -n "$candidate" ] && is_handled_shell "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    candidate=$(parent_login_shell) || candidate=
+    if [ -n "$candidate" ]; then
         printf '%s\n' "$candidate"
         return 0
     fi
@@ -231,6 +277,19 @@ no_profile_edit() {
     return 1
 }
 
+# The marked block. Its body is a POSIX ``case ":$PATH:"`` guard: the launcher
+# directory is prepended only when it is not already in PATH, so sourcing the
+# block twice, or from several profiles, leaves one entry in PATH.
+print_block() {
+    printf '%s\n' "$MARKER_START"
+    printf 'case ":$PATH:" in\n'
+    printf '    *":%s:"*) ;;\n' "$BIN_DIR"
+    printf '    *) PATH="%s:$PATH" ;;\n' "$BIN_DIR"
+    printf 'esac\n'
+    printf 'export PATH\n'
+    printf '%s\n' "$MARKER_END"
+}
+
 # Drop the marked block, if there is one. Every other line is kept as it was.
 remove_profile_block() {
     profile=$1
@@ -263,7 +322,9 @@ remove_profile_block() {
     return 0
 }
 
-# Exactly one block, whatever the profile already held.
+# Exactly one block, whatever the profile already held. The previous block is
+# removed first and only then is the new one appended, so an interrupted run
+# leaves one block at most.
 add_profile_block() {
     profile=$1
     case $profile in
@@ -277,19 +338,62 @@ add_profile_block() {
             printf '\n' >> "$profile"
         fi
     fi
-    {
-        printf '%s\n' "$MARKER_START"
-        printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
-        printf '%s\n' "$MARKER_END"
-    } >> "$profile"
+    print_block >> "$profile"
     return 0
 }
 
-# The detected shell as a login interactive shell started from a cleared
-# environment: a new terminal, with nothing inherited from this one.
-fresh_shell_report() {
-    shell=$1
-    env -i HOME="$HOME_DIR" SHELL="$shell" TERM=dumb PATH="$CHECK_PATH" "$shell" -l -i -c "$CHECK_COMMAND" </dev/null 2>/dev/null || true
+# Run a command under a portable watchdog. ``timeout`` from GNU coreutils is not
+# required: the command runs in the background with stdin closed, a watcher
+# kills it when the bound elapses, and the caller returns as soon as the command
+# itself is done. The watcher holds no stream of the caller and exits by itself
+# once the command is gone; it is stopped before the function returns, so no
+# process is left behind. BOUNDED_STATUS is 124 when the watchdog had to kill
+# the command.
+bounded_run() {
+    limit=$1
+    shift
+    stamp=${TMPDIR:-/tmp}/forgel-code-check.$$
+    out=$stamp.out
+    done_marker=$stamp.done
+    killed_marker=$stamp.killed
+    rm -f "$out" "$done_marker" "$killed_marker"
+    if ! : > "$out"; then
+        return 1
+    fi
+    BOUNDED_STATUS=0
+    BOUNDED_OUTPUT=
+    "$@" > "$out" 2>/dev/null < /dev/null &
+    child=$!
+    (
+        # The watcher keeps no stream of the caller: a descriptor it held open
+        # would outlive the command it guards.
+        exec >/dev/null 2>&1 < /dev/null
+        sleeper=
+        trap 'kill "$sleeper" 2>/dev/null || true; exit 0' TERM
+        seconds=0
+        while [ "$seconds" -lt "$limit" ]; do
+            sleep 1 &
+            sleeper=$!
+            wait "$sleeper" 2>/dev/null || true
+            sleeper=
+            seconds=$((seconds + 1))
+            if [ -e "$done_marker" ] || ! kill -0 "$child" 2>/dev/null; then
+                exit 0
+            fi
+        done
+        : > "$killed_marker" 2>/dev/null || true
+        kill -TERM "$child" 2>/dev/null || true
+    ) &
+    watcher=$!
+    wait "$child" || BOUNDED_STATUS=$?
+    : > "$done_marker"
+    kill -TERM "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    BOUNDED_OUTPUT=$(sed -n 'p' "$out") || BOUNDED_OUTPUT=
+    if [ -e "$killed_marker" ]; then
+        BOUNDED_STATUS=124
+    fi
+    rm -f "$out" "$done_marker" "$killed_marker"
     return 0
 }
 
@@ -301,6 +405,8 @@ report_resolved() {
     printf '%s\n' "$1" | sed -n 's/^forgel-fresh-resolved=//p' | tail -n 1
 }
 
+# The defined failure report: the edited file, the exact block, the shell that
+# was checked and the PATH that shell reported.
 verification_failure() {
     shell=$1
     profile=$2
@@ -310,9 +416,7 @@ verification_failure() {
     echo "install.sh: login shell: $shell" >&2
     echo "install.sh: profile file: $profile" >&2
     echo "install.sh: PATH block written:" >&2
-    printf '%s\n' "$MARKER_START" >&2
-    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR" >&2
-    printf '%s\n' "$MARKER_END" >&2
+    print_block >&2
     echo "install.sh: PATH in the fresh shell: ${fresh_path:-<empty>}" >&2
     echo "install.sh: forgel-code resolves to: ${resolved:-<not found>}" >&2
     echo "install.sh: that shell does not read $profile when it starts a login session" >&2
@@ -328,7 +432,8 @@ verify_profile() {
     resolved=
     fresh_path=
     if [ -n "$shell" ] && [ -x "$shell" ]; then
-        report=$(fresh_shell_report "$shell")
+        bounded_run "$VERIFY_LIMIT" env -i HOME="$HOME_DIR" SHELL="$shell" TERM=dumb PATH="$CHECK_PATH" "$shell" -l -i -c "$CHECK_COMMAND"
+        report=$BOUNDED_OUTPUT
         fresh_path=$(report_path "$report")
         resolved=$(report_resolved "$report")
     fi
@@ -364,6 +469,11 @@ add_path() {
     if ! add_profile_block "$profile"; then
         return 1
     fi
+    case $(shell_family "$DETECTED_SHELL") in
+        posix)
+            echo "install.sh: warning: $DETECTED_SHELL is neither zsh nor bash; the PATH block is in $profile" >&2
+            ;;
+    esac
     if ! verify_profile "$DETECTED_SHELL" "$profile"; then
         return 1
     fi
@@ -392,7 +502,7 @@ install_client() {
     fi
     echo "Installing Forgel Code from $SOURCE"
     mkdir -p "$PREFIX"
-    if ! "$PYTHON" -m pip install --target "$PREFIX" --upgrade --no-deps --no-index --no-cache-dir --no-build-isolation --disable-pip-version-check --no-warn-script-location "$SOURCE"; then
+    if ! "$PYTHON" -m pip install --target "$PREFIX" --upgrade --no-deps --no-index --no-cache-dir --no-build-isolation --no-compile --disable-pip-version-check --no-warn-script-location "$SOURCE"; then
         echo "install.sh: installing the client failed" >&2
         return 1
     fi

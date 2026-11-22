@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,7 @@ fi
 shell=${FORGEL_STUB_USER_SHELL:-/bin/zsh}
 printf 'UserShell: %s\\n' "$shell"
 """
+
 
 
 def _source_version() -> str:
@@ -201,6 +203,22 @@ def _fresh_login_shell(shell, home: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _resolved_by(shell, home: Path) -> Path:
+    """What ``command -v forgel-code`` answers in a fresh login shell of ``shell``."""
+    fresh = _fresh_login_shell(shell, home)
+    lines = [line for line in fresh.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise AssertionError(
+            "the fresh %s printed nothing:\n%s" % (shell, fresh.stderr)
+        )
+    return Path(lines[-1]).resolve()
+
+
+def _path_occurrences(path_value: str, entry: Path) -> int:
+    """How many colon-separated entries of ``path_value`` equal ``entry``."""
+    return sum(1 for part in path_value.split(os.pathsep) if part == str(entry))
+
+
 def _installed_version(target: Path) -> str:
     """The version METADATA of the installed distribution carries."""
     for metadata in sorted(target.glob("forgel_code-*.dist-info/METADATA")):
@@ -230,9 +248,27 @@ def _marker_count(profile: Path) -> int:
     )
 
 
+def _guarded_line(bin_dir: Path) -> str:
+    """The line that prepends the launcher directory, guarded by ``case``."""
+    return '    *) PATH="%s:$PATH" ;;' % bin_dir
+
+
+def _unguarded_line(bin_dir: Path) -> str:
+    """The bare ``export PATH=...`` line the block must never contain."""
+    return 'export PATH="%s:$PATH"' % bin_dir
+
+
 def _marked_block(bin_dir: Path) -> str:
     """The exact block the install path appends to the profile it selects."""
-    return '%s\nexport PATH="%s:$PATH"\n%s\n' % (MARKER_START, bin_dir, MARKER_END)
+    return (
+        "%s\n"
+        'case ":$PATH:" in\n'
+        '    *":%s:"*) ;;\n'
+        '    *) PATH="%s:$PATH" ;;\n'
+        "esac\n"
+        "export PATH\n"
+        "%s\n" % (MARKER_START, bin_dir, bin_dir, MARKER_END)
+    )
 
 
 class InstallerCase(unittest.TestCase):
@@ -316,7 +352,12 @@ class InstallerTest(InstallerCase):
         text = self.profile.read_text(encoding="utf-8")
         self.assertEqual(_marker_count(self.profile), 1, text)
         self.assertIn(MARKER_END, text)
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, text)
+        self.assertIn(_guarded_line(self.bin_dir), text)
+        self.assertNotIn(
+            _unguarded_line(self.bin_dir),
+            text,
+            "the block carries a bare export PATH= line",
+        )
 
     def test_install_reports_the_shell_profile_and_the_fresh_check(self) -> None:
         result = self.install()
@@ -328,22 +369,38 @@ class InstallerTest(InstallerCase):
             result.stdout,
         )
 
-    def test_profile_the_login_shell_ignores_fails_verification(self) -> None:
+    def test_login_shell_resolves_forgel_code_after_install(self) -> None:
+        """A cleared, freshly started login shell finds the launcher unaided."""
+        result = self.install()
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(
+            _resolved_by("/bin/sh", self.home), self.launcher.resolve()
+        )
+
+    def test_failed_verification_reports_file_block_shell_and_path(self) -> None:
         ignored = self.home / ".ignored_profile"
         env = dict(self.env)
         env["FORGEL_CODE_PROFILE"] = str(ignored)
         result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(str(ignored), result.stderr)
+        self.assertIn("login shell: /bin/sh", result.stderr)
         self.assertIn(MARKER_START, result.stderr)
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, result.stderr)
+        self.assertIn(_guarded_line(self.bin_dir), result.stderr)
+        self.assertIn("PATH in the fresh shell:", result.stderr)
+        self.assertIn("/usr/bin:/bin", result.stderr)
         self.assertEqual(_marker_count(ignored), 1)
         self.assertNotIn("PATH block written", result.stdout)
 
-    def test_second_run_is_idempotent(self) -> None:
+    def test_repeated_install_keeps_one_block_and_one_path_entry(self) -> None:
         first = self.install()
         self.assertEqual(first.returncode, 0, first.stderr)
         block = self.profile.read_text(encoding="utf-8")
+        self.assertEqual(block, _marked_block(self.bin_dir))
 
         second = self.install()
         self.assertEqual(second.returncode, 0, second.stderr)
@@ -351,7 +408,64 @@ class InstallerTest(InstallerCase):
         self.assertEqual(_marker_count(self.profile), 1)
         self.assert_installed()
 
-    def test_piped_install_does_not_read_the_script_from_stdin(self) -> None:
+        fresh = _fresh_login_shell("/bin/sh", self.home)
+        path_value = subprocess.run(
+            ["/bin/sh", "-l", "-i", "-c", 'printf "%s" "$PATH"'],
+            cwd=str(self.home),
+            env={
+                "HOME": str(self.home),
+                "SHELL": "/bin/sh",
+                "TERM": "dumb",
+                "PATH": "/usr/bin:/bin",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        ).stdout.strip()
+        self.assertTrue(fresh.returncode == 0, fresh.stderr)
+        self.assertEqual(
+            _path_occurrences(path_value, self.bin_dir),
+            1,
+            "the launcher directory appears more than once in %s" % path_value,
+        )
+
+    def test_guard_keeps_one_entry_when_several_profiles_are_sourced(self) -> None:
+        """Sourcing each profile that carries the block adds the entry once."""
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        block = self.profile.read_text(encoding="utf-8")
+        self.assertEqual(block, _marked_block(self.bin_dir))
+        extra = []
+        for name in (".bashrc", ".zshrc"):
+            path = self.home / name
+            path.write_text("# keep-%s\n" % name + block, encoding="utf-8")
+            extra.append(path)
+
+        script = '; '.join('. "%s"' % path for path in [self.profile] + extra)
+        script += '; printf "%s" "$PATH"'
+        sourced = subprocess.run(
+            ["/bin/sh", "-c", script],
+            cwd=str(self.home),
+            env={
+                "HOME": str(self.home),
+                "SHELL": "/bin/sh",
+                "PATH": "/usr/bin:/bin",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+        self.assertEqual(sourced.returncode, 0, sourced.stderr)
+        self.assertEqual(
+            _path_occurrences(sourced.stdout.strip(), self.bin_dir),
+            1,
+            "the launcher directory appears more than once in %s"
+            % sourced.stdout.strip(),
+        )
+
+    def test_piped_install_reads_the_script_from_stdin(self) -> None:
         """The documented ``curl ... | sh`` shape, with the script on stdin."""
         script = INSTALL_SH.read_text(encoding="utf-8")
         result = subprocess.run(
@@ -370,6 +484,9 @@ class InstallerTest(InstallerCase):
         )
         self.assert_installed()
         self.assertEqual(_marker_count(self.profile), 1)
+        self.assertEqual(
+            _resolved_by("/bin/sh", self.home), self.launcher.resolve()
+        )
 
     def test_missing_interpreter_fails_with_a_message(self) -> None:
         env = dict(self.env)
@@ -393,7 +510,7 @@ class InstallerShellDetectionTest(InstallerCase):
         env.update(extra)
         return env
 
-    def test_unset_shell_puts_the_block_in_zshrc(self) -> None:
+    def test_zsh_without_shell_puts_the_block_in_zshrc(self) -> None:
         zsh = shutil.which("zsh")
         if not zsh:
             self.skipTest("zsh is not installed")
@@ -422,18 +539,13 @@ class InstallerShellDetectionTest(InstallerCase):
             ),
         )
         self.assertEqual(_marker_count(zshrc), 1)
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, zshrc.read_text())
+        self.assertIn(_guarded_line(self.bin_dir), zshrc.read_text())
         self.assertFalse(
             (self.home / ".profile").exists(),
             "the installer fell back to ~/.profile",
         )
         self.assertIn("Login shell: %s" % zsh, result.stdout)
-
-        fresh = _fresh_login_shell(zsh, self.home)
-        self.assertEqual(fresh.returncode, 0, fresh.stderr)
-        lines = [line for line in fresh.stdout.splitlines() if line.strip()]
-        self.assertTrue(lines, "the fresh zsh printed nothing: %s" % fresh.stderr)
-        self.assertEqual(Path(lines[-1]).resolve(), self.launcher.resolve())
+        self.assertEqual(_resolved_by(zsh, self.home), self.launcher.resolve())
 
     def test_bash_uses_an_existing_bash_profile(self) -> None:
         bash = shutil.which("bash")
@@ -451,11 +563,12 @@ class InstallerShellDetectionTest(InstallerCase):
         text = profile.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("export EDITOR=vi\n"), text)
         self.assertEqual(_marker_count(profile), 1)
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, text)
+        self.assertIn(_guarded_line(self.bin_dir), text)
         self.assertFalse(
             (self.home / ".bashrc").exists(),
             "the installer created ~/.bashrc for a login bash",
         )
+        self.assertEqual(_resolved_by(bash, self.home), self.launcher.resolve())
 
     def test_bash_creates_a_bash_profile_when_none_exists(self) -> None:
         bash = shutil.which("bash")
@@ -471,11 +584,64 @@ class InstallerShellDetectionTest(InstallerCase):
         profile = self.home / ".bash_profile"
         self.assertTrue(profile.is_file(), "no ~/.bash_profile was created")
         self.assertEqual(_marker_count(profile), 1)
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, profile.read_text())
+        self.assertIn(_guarded_line(self.bin_dir), profile.read_text())
         for name in (".bashrc", ".bash_login"):
             self.assertFalse(
                 (self.home / name).exists(), "the installer created %s" % name
             )
+        self.assertEqual(_resolved_by(bash, self.home), self.launcher.resolve())
+
+    def test_unknown_shell_writes_profile_and_warns(self) -> None:
+        """A POSIX shell outside zsh and bash gets ~/.profile plus a warning."""
+        posix_shell = "/bin/sh"
+        env = self.detection_environment(SHELL=posix_shell)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        profile = self.home / ".profile"
+        self.assertTrue(profile.is_file(), "no ~/.profile was created")
+        self.assertEqual(_marker_count(profile), 1)
+        self.assertIn(_guarded_line(self.bin_dir), profile.read_text())
+        self.assertIn("warning", result.stderr)
+        self.assertIn(str(profile), result.stderr)
+        self.assertIn(posix_shell, result.stderr)
+        for name in (".zshrc", ".bash_profile", ".bash_login"):
+            self.assertFalse(
+                (self.home / name).exists(), "the installer created %s" % name
+            )
+        self.assertEqual(
+            _resolved_by(posix_shell, self.home), self.launcher.resolve()
+        )
+
+
+def _hanging_shell(directory: Path) -> Path:
+    """A handled shell name whose login session never finishes."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "bash"
+    stub.write_text("#!/bin/sh\nsleep 120\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+class InstallerWatchdogTest(InstallerCase):
+    """The post-write check is bounded, so a hanging shell cannot hang it."""
+
+    def test_hanging_login_shell_is_killed_and_reported(self) -> None:
+        stub = _hanging_shell(self.base / "stubs")
+        profile = self.home / ".bash_profile"
+        env = dict(self.env)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["SHELL"] = str(stub)
+        started = time.monotonic()
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertLess(elapsed, 90, "the check did not honour its time bound")
+        self.assertIn("did not put forgel-code on PATH", result.stderr)
+        self.assertIn(str(profile), result.stderr)
 
 
 class InstallerOptOutTest(InstallerCase):
@@ -502,7 +668,7 @@ class InstallerOptOutTest(InstallerCase):
         )
         self.assertFalse(self.profile.exists(), "the profile was created")
         self.assertEqual(self.profiles(), [], "a shell profile was written")
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, result.stdout)
+        self.assertIn(_unguarded_line(self.bin_dir), result.stdout)
         self.assertTrue(self.launcher.is_file())
 
     def test_opt_out_writes_nothing_outside_the_target_directories(self) -> None:
@@ -527,7 +693,7 @@ class InstallerOptOutTest(InstallerCase):
         result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.profile.exists())
-        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, result.stdout)
+        self.assertIn(_unguarded_line(self.bin_dir), result.stdout)
 
 
 class InstallerUninstallTest(InstallerCase):
