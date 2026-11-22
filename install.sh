@@ -28,6 +28,10 @@
 #   FORGEL_CODE_NO_MODIFY_PATH  set to leave the shell profile untouched
 #   FORGEL_CODE_NO_PROFILE_EDIT the same opt-out under its older name
 #   FORGEL_CODE_TIMEOUT         seconds the fresh-shell check may take (default: 10)
+#   FORGEL_CODE_VERIFY_GRACE    seconds between the graceful stop and the
+#                               forceful one when the bound elapses (default: 2)
+#   FORGEL_CODE_POLL_MS         how often, in milliseconds, the watchdog looks
+#                               at the checked process (default: 1000)
 #
 # The script is POSIX ``sh`` and safe to pipe into: it never reads stdin.
 
@@ -58,12 +62,13 @@ CHECK_PATH=/usr/bin:/bin
 CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forgel-code || true); printf "forgel-fresh-resolved=%s\n" "$fresh"'
 
 # The bound for the fresh-shell check, in seconds, when FORGEL_CODE_TIMEOUT is
-# unset, and the grace period the checked shell gets between the graceful stop
-# and the forceful one. A login shell reads its startup files in milliseconds;
-# ten seconds leaves room on a slow machine and still bounds a shell that never
-# answers.
+# unset, the grace period the checked shell gets between the graceful stop and
+# the forceful one, and the watchdog's poll interval in milliseconds. A login
+# shell reads its startup files in milliseconds; ten seconds leaves room on a
+# slow machine and still bounds a shell that never answers.
 DEFAULT_VERIFY_LIMIT=10
 VERIFY_GRACE=2
+VERIFY_POLL_MS=1000
 
 # The profile files this installer can have written. ``--uninstall`` cleans the
 # block out of every one of them, so no stale PATH entry stays behind. The list
@@ -312,11 +317,25 @@ ends_with_newline() {
     [ "$(tail -c 1 "$1" | wc -l | tr -d ' ')" = "1" ]
 }
 
+# Whether a start marker is left open, without an end marker after it. Such a
+# block is not a block: where it ends is unknown, so it is never removed and the
+# file is left exactly as it is. Status 0 means an open marker was found, 1 a
+# well-formed or marker-free file, anything else that the file is unreadable.
+has_unclosed_block() {
+    awk -v start="$MARKER_START" -v end="$MARKER_END" '
+        $0 == start { inside = 1; next }
+        $0 == end { inside = 0 }
+        END { exit (inside ? 0 : 1) }
+    ' "$1"
+}
+
 # Drop the marked block, if there is one. Every other line is kept byte for
 # byte, including whether the file ended with a newline: the rewrite carries
 # the last line without a terminator when the input had none. A block this
 # installer appended after a last line that had no final newline carries the
-# separator comment, and both go away, so uninstall restores the original.
+# separator comment, and both go away, so uninstall restores the original. An
+# unterminated start marker is reported and the file is left untouched, because
+# removing everything from that marker on would delete unrelated content.
 remove_profile_block() {
     profile=$1
     if [ ! -f "$profile" ]; then
@@ -325,6 +344,19 @@ remove_profile_block() {
     if ! grep -Fq "$MARKER_START" "$profile"; then
         return 0
     fi
+    scan=0
+    has_unclosed_block "$profile" || scan=$?
+    case $scan in
+        0)
+            echo "install.sh: $profile has a '$MARKER_START' line with no matching '$MARKER_END' line; leaving the file unchanged. Repair that block and run install.sh again." >&2
+            return 1
+            ;;
+        1) ;;
+        *)
+            echo "install.sh: cannot read $profile" >&2
+            return 1
+            ;;
+    esac
     tmp=$profile.forgel-code.$$
     if ! cp -p "$profile" "$tmp"; then
         echo "install.sh: cannot write next to $profile" >&2
@@ -427,6 +459,38 @@ verify_limit() {
     esac
     if [ "$configured" -lt 1 ]; then
         printf '%s\n' "$DEFAULT_VERIFY_LIMIT"
+        return 0
+    fi
+    printf '%s\n' "$configured"
+}
+
+# The grace period in seconds between the graceful stop and the forceful one:
+# FORGEL_CODE_VERIFY_GRACE when it is a non-negative integer, the built-in
+# default otherwise. Zero is allowed and stops forcefully at once.
+verify_grace() {
+    configured=${FORGEL_CODE_VERIFY_GRACE:-}
+    case $configured in
+        ''|*[!0-9]*)
+            printf '%s\n' "$VERIFY_GRACE"
+            return 0
+            ;;
+    esac
+    printf '%s\n' "$configured"
+}
+
+# The watchdog's poll interval in milliseconds: FORGEL_CODE_POLL_MS when it is a
+# positive integer, one second otherwise. The default is a whole second, so the
+# default path asks nothing of ``sleep`` beyond POSIX.
+verify_poll() {
+    configured=${FORGEL_CODE_POLL_MS:-}
+    case $configured in
+        ''|*[!0-9]*)
+            printf '%s\n' "$VERIFY_POLL_MS"
+            return 0
+            ;;
+    esac
+    if [ "$configured" -lt 1 ]; then
+        printf '%s\n' "$VERIFY_POLL_MS"
         return 0
     fi
     printf '%s\n' "$configured"
@@ -568,6 +632,8 @@ check_interrupted() {
 bounded_run() {
     limit=$1
     shift
+    grace=$(verify_grace)
+    poll=$(verify_poll)
     CHECK_STATUS=0
     CHECK_OUTPUT=
     if ! create_check_dir; then
@@ -590,20 +656,35 @@ bounded_run() {
         exec > /dev/null 2>&1 < /dev/null
         sleeper=
         trap 'kill "$sleeper" 2>/dev/null || true; exit 0' TERM
-        elapsed=0
-        while [ "$elapsed" -lt "$limit" ]; do
-            sleep 1 &
+        # A partial second poll only works where ``sleep`` understands one; fall
+        # back to whole seconds so the bound never elapses early.
+        if [ $((poll % 1000)) -ne 0 ] && ! sleep 0.001 2>/dev/null; then
+            poll=1000
+        fi
+        limit_ms=$((limit * 1000))
+        elapsed_ms=0
+        while [ "$elapsed_ms" -lt "$limit_ms" ]; do
+            pause=$poll
+            remaining=$((limit_ms - elapsed_ms))
+            if [ "$pause" -gt "$remaining" ]; then
+                pause=$remaining
+            fi
+            delay=$((pause / 1000))
+            if [ $((pause % 1000)) -ne 0 ]; then
+                delay=$(printf '%d.%03d' "$delay" $((pause % 1000)))
+            fi
+            sleep "$delay" &
             sleeper=$!
             wait "$sleeper" 2>/dev/null || true
             sleeper=
-            elapsed=$((elapsed + 1))
+            elapsed_ms=$((elapsed_ms + pause))
             if ! kill -0 "$child" 2>/dev/null; then
                 exit 0
             fi
         done
         : > "$timed_out" 2>/dev/null || true
         signal_run TERM "$child"
-        sleep "$VERIFY_GRACE" 2>/dev/null || true
+        sleep "$grace" 2>/dev/null || true
         signal_run KILL "$child"
     ) &
     CHECK_WATCHER=$!
@@ -734,9 +815,14 @@ install_client() {
         echo "install.sh: $PYTHON is older than Python 3.9 or cannot run" >&2
         return 1
     fi
-    if ! "$PYTHON" -c 'import pip' >/dev/null 2>&1; then
-        echo "install.sh: $PYTHON has no pip module; install pip and try again" >&2
-        return 1
+    # Looking pip up by name is answerable without importing it, which costs a
+    # fraction of the import. Only an interpreter that cannot even name the
+    # module pays for the import that tells us whether it works.
+    if ! "$PYTHON" -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("pip") is not None else 1)' >/dev/null 2>&1; then
+        if ! "$PYTHON" -c 'import pip' >/dev/null 2>&1; then
+            echo "install.sh: $PYTHON has no pip module; install pip and try again" >&2
+            return 1
+        fi
     fi
     if ! SOURCE=$(resolve_source); then
         return 1
