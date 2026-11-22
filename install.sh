@@ -7,9 +7,13 @@
 #
 # The client goes into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}, the
 # ``forgel-code`` launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, and that
-# directory is put on PATH through one marked block in the shell profile, so no
-# virtual environment and no activation step are involved. Re-running replaces
-# the installation; running with ``--uninstall`` removes it again.
+# directory is put on PATH through one marked block in the profile the login
+# shell reads. The login shell is taken from $SHELL; when that is unset, empty or
+# names a shell this installer does not handle, the account login shell decides.
+# After writing the block the installer starts that shell as a login interactive
+# shell from a cleared environment and checks that ``forgel-code`` resolves to
+# the launcher it just wrote. Re-running replaces the installation; running with
+# ``--uninstall`` removes it again.
 #
 # Environment variables:
 #   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
@@ -18,7 +22,7 @@
 #   FORGEL_CODE_TAG             repository tag when no checkout is given (default: v0.1.0)
 #   FORGEL_CODE_REPOSITORY      repository URL used with FORGEL_CODE_TAG
 #   FORGEL_CODE_PYTHON          Python 3 interpreter (default: python3 on PATH)
-#   FORGEL_CODE_PROFILE         shell profile to edit (default: chosen from $SHELL)
+#   FORGEL_CODE_PROFILE         shell profile to edit (default: chosen from the login shell)
 #   FORGEL_CODE_NO_MODIFY_PATH  set to leave the shell profile untouched
 #   FORGEL_CODE_NO_PROFILE_EDIT the same opt-out under its older name
 #
@@ -37,13 +41,27 @@ LAUNCHER=$BIN_DIR/forgel-code
 TAG=${FORGEL_CODE_TAG:-v0.1.0}
 REPOSITORY=${FORGEL_CODE_REPOSITORY:-https://github.com/forgel-dev/code}
 
+# What a fresh shell reports back: its own PATH and the path it resolves
+# ``forgel-code`` to. The prefixes keep the answer readable next to anything a
+# system-wide profile may print.
+CHECK_PATH=/usr/bin:/bin
+CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forgel-code || true); printf "forgel-fresh-resolved=%s\n" "$fresh"'
+
+# The profile files this installer can have written. ``--uninstall`` cleans the
+# block out of every one of them, so no stale PATH entry stays behind.
+PROFILE_NAMES='.zshrc .zprofile .zshenv .bash_profile .bash_login .profile'
+
+# Set by ``verify_profile`` once the fresh shell resolved the launcher.
+VERIFIED_PATH=
+
 usage() {
     cat <<'USAGE'
 Usage: install.sh [--uninstall] [--help]
 
 Installs the Forgel Code client into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}
 and its launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, adding that directory
-to PATH with one marked block in the shell profile.
+to PATH with one marked block in the profile the login shell reads. The result
+is checked in a freshly started login interactive shell.
 
   --uninstall   remove the installation, the launcher and the PATH block
   --help        show this text
@@ -108,25 +126,89 @@ resolve_source() {
     printf '%s\n' "$REPOSITORY/archive/refs/tags/$TAG.tar.gz"
 }
 
-# Which shell profile to edit. $SHELL decides, $HOME/.profile is the fallback.
+# The account login shell: the macOS Directory Service entry first, then the
+# passwd database. Prints nothing when neither source answers.
+account_login_shell() {
+    if command -v dscl >/dev/null 2>&1; then
+        found=$(dscl . -read "$HOME_DIR" UserShell 2>/dev/null | sed -n 's/^UserShell:[[:space:]]*//p' | head -n 1) || found=
+        if [ -n "$found" ]; then
+            printf '%s\n' "$found"
+            return 0
+        fi
+    fi
+    user=$(id -u 2>/dev/null) || user=
+    if [ -n "$user" ]; then
+        found=
+        if command -v getent >/dev/null 2>&1; then
+            found=$(getent passwd "$user" 2>/dev/null | cut -d: -f7 | head -n 1) || found=
+        fi
+        if [ -z "$found" ] && [ -r /etc/passwd ]; then
+            found=$(awk -F: -v u="$user" '$3 == u { print $7; exit }' /etc/passwd) || found=
+        fi
+        if [ -n "$found" ]; then
+            printf '%s\n' "$found"
+            return 0
+        fi
+    fi
+    printf '\n'
+}
+
+shell_name() {
+    printf '%s\n' "${1##*/}"
+}
+
+# The shells whose login sessions this installer can place a PATH block for.
+is_handled_shell() {
+    case $(shell_name "$1") in
+        zsh|bash|sh|dash|ksh|ksh93|mksh|pdksh|ash|yash) return 0 ;;
+    esac
+    return 1
+}
+
+# The shell that reads the edited profile for an interactive login session.
+# $SHELL decides when it names a shell we handle; otherwise the account login
+# shell decides, and a POSIX ``sh`` is the last resort, which reads $HOME/.profile.
+detect_login_shell() {
+    candidate=${SHELL:-}
+    if [ -n "$candidate" ] && is_handled_shell "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    candidate=$(account_login_shell) || candidate=
+    if [ -n "$candidate" ] && is_handled_shell "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    printf '%s\n' /bin/sh
+}
+
+shell_family() {
+    case $(shell_name "$1") in
+        zsh) printf '%s\n' zsh ;;
+        bash) printf '%s\n' bash ;;
+        *) printf '%s\n' posix ;;
+    esac
+}
+
+# Which profile file an interactive login session of the detected shell reads.
+# The block never goes into $HOME/.bashrc alone: a login bash does not read it.
 profile_path() {
     if [ -n "${FORGEL_CODE_PROFILE:-}" ]; then
         printf '%s\n' "$FORGEL_CODE_PROFILE"
         return 0
     fi
-    shell_name=${SHELL##*/}
-    case $shell_name in
+    case $(shell_family "$DETECTED_SHELL") in
         zsh)
             printf '%s\n' "$HOME_DIR/.zshrc"
             ;;
         bash)
-            if [ -f "$HOME_DIR/.bashrc" ]; then
-                printf '%s\n' "$HOME_DIR/.bashrc"
-            elif [ -f "$HOME_DIR/.bash_profile" ]; then
-                printf '%s\n' "$HOME_DIR/.bash_profile"
-            else
-                printf '%s\n' "$HOME_DIR/.bashrc"
-            fi
+            for name in .bash_profile .bash_login .profile; do
+                if [ -f "$HOME_DIR/$name" ]; then
+                    printf '%s\n' "$HOME_DIR/$name"
+                    return 0
+                fi
+            done
+            printf '%s\n' "$HOME_DIR/.bash_profile"
             ;;
         *)
             printf '%s\n' "$HOME_DIR/.profile"
@@ -200,6 +282,61 @@ add_profile_block() {
     return 0
 }
 
+# The detected shell as a login interactive shell started from a cleared
+# environment: a new terminal, with nothing inherited from this one.
+fresh_shell_report() {
+    shell=$1
+    env -i HOME="$HOME_DIR" SHELL="$shell" TERM=dumb PATH="$CHECK_PATH" "$shell" -l -i -c "$CHECK_COMMAND" </dev/null 2>/dev/null || true
+    return 0
+}
+
+report_path() {
+    printf '%s\n' "$1" | sed -n 's/^forgel-fresh-path=//p' | tail -n 1
+}
+
+report_resolved() {
+    printf '%s\n' "$1" | sed -n 's/^forgel-fresh-resolved=//p' | tail -n 1
+}
+
+verification_failure() {
+    shell=$1
+    profile=$2
+    fresh_path=$3
+    resolved=$4
+    echo "install.sh: the fresh login shell did not put forgel-code on PATH" >&2
+    echo "install.sh: login shell: $shell" >&2
+    echo "install.sh: profile file: $profile" >&2
+    echo "install.sh: PATH block written:" >&2
+    printf '%s\n' "$MARKER_START" >&2
+    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR" >&2
+    printf '%s\n' "$MARKER_END" >&2
+    echo "install.sh: PATH in the fresh shell: ${fresh_path:-<empty>}" >&2
+    echo "install.sh: forgel-code resolves to: ${resolved:-<not found>}" >&2
+    echo "install.sh: that shell does not read $profile when it starts a login session" >&2
+    return 0
+}
+
+# Verify the block in a freshly started login interactive shell. The check
+# passes only when that shell resolves forgel-code to the launcher just written.
+verify_profile() {
+    shell=$1
+    profile=$2
+    report=
+    resolved=
+    fresh_path=
+    if [ -n "$shell" ] && [ -x "$shell" ]; then
+        report=$(fresh_shell_report "$shell")
+        fresh_path=$(report_path "$report")
+        resolved=$(report_resolved "$report")
+    fi
+    if [ "$resolved" = "$LAUNCHER" ]; then
+        VERIFIED_PATH=$resolved
+        return 0
+    fi
+    verification_failure "$shell" "$profile" "$fresh_path" "$resolved"
+    return 1
+}
+
 write_launcher() {
     mkdir -p "$BIN_DIR"
     {
@@ -219,12 +356,18 @@ add_path() {
         printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
         return 0
     fi
+    DETECTED_SHELL=$(detect_login_shell)
     profile=$(profile_path)
     if ! add_profile_block "$profile"; then
         return 1
     fi
-    echo "Added $BIN_DIR to PATH in $profile"
-    echo "Open a new shell to pick the change up."
+    if ! verify_profile "$DETECTED_SHELL" "$profile"; then
+        return 1
+    fi
+    echo "Login shell: $DETECTED_SHELL"
+    echo "PATH block written to $profile"
+    echo "Fresh login shell check: command -v forgel-code -> $VERIFIED_PATH"
+    echo "Open a new terminal to pick the change up."
     return 0
 }
 
@@ -246,16 +389,7 @@ install_client() {
     fi
     echo "Installing Forgel Code from $SOURCE"
     mkdir -p "$PREFIX"
-    if ! "$PYTHON" -m pip install \
-        --target "$PREFIX" \
-        --upgrade \
-        --no-deps \
-        --no-index \
-        --no-cache-dir \
-        --no-build-isolation \
-        --disable-pip-version-check \
-        --no-warn-script-location \
-        "$SOURCE"; then
+    if ! "$PYTHON" -m pip install --target "$PREFIX" --upgrade --no-deps --no-index --no-cache-dir --no-build-isolation --disable-pip-version-check --no-warn-script-location "$SOURCE"; then
         echo "install.sh: installing the client failed" >&2
         return 1
     fi
@@ -291,14 +425,17 @@ uninstall() {
             status=1
         fi
     fi
-    profile=$(profile_path)
-    if [ -f "$profile" ] && grep -Fq "$MARKER_START" "$profile"; then
+    for name in $PROFILE_NAMES; do
+        profile=$HOME_DIR/$name
+        if [ ! -f "$profile" ] || ! grep -Fq "$MARKER_START" "$profile"; then
+            continue
+        fi
         if remove_profile_block "$profile"; then
             echo "Removed the PATH block from $profile"
         else
             status=1
         fi
-    fi
+    done
     if [ "$status" = "0" ]; then
         echo "Forgel Code is uninstalled."
     fi

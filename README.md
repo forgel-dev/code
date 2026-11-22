@@ -20,10 +20,31 @@ curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh |
 
 The installer puts the client into `~/.local/share/forgel-code` and a
 `forgel-code` launcher into `~/.local/bin`, then adds that directory to `PATH`
-through one marked block in your shell profile — `~/.zshrc` for zsh,
-`~/.bashrc` (or `~/.bash_profile`) for bash, `~/.profile` otherwise. No virtual
+through one marked block in the profile your login shell reads. No virtual
 environment and no activation step are involved, and the same command run again
 replaces the installation instead of duplicating anything.
+
+| Login shell | Profile file that receives the block |
+| --- | --- |
+| zsh | `~/.zshrc` |
+| bash | the first existing of `~/.bash_profile`, `~/.bash_login`, `~/.profile`; `~/.bash_profile` is created when none of them exists |
+| other POSIX `sh` | `~/.profile` |
+
+The login shell comes from `$SHELL`. When that is unset, empty or names a shell
+the installer does not handle, it reads the account login shell — the macOS
+Directory Service entry, otherwise the passwd entry — and only then falls back
+to `~/.profile`. The block is never written to `~/.bashrc` alone, because a login
+bash shell does not read that file. A profile file that does not exist yet is
+created.
+
+After writing the block the installer checks it: it starts the detected login
+shell as a login interactive shell from a cleared environment and requires
+`command -v forgel-code` to resolve to the launcher it just wrote. On success it
+prints the detected shell, the edited profile file and the path that fresh shell
+resolved. If the check fails it exits non-zero and prints the edited profile
+file, the block it wrote and the `PATH` the fresh shell saw, so a profile your
+login shell never reads is never reported as active. Re-running keeps exactly
+one marked block and leaves the rest of the file as it was.
 
 The client has no dependencies and builds through the small in-tree PEP 517
 backend (`_build_backend.py`), so the installer never needs a package index.
@@ -36,12 +57,16 @@ Editable installs are not supported: the backend implements only the
 | --- | --- |
 | `FORGEL_CODE_HOME` | installation prefix (default `~/.local/share/forgel-code`) |
 | `FORGEL_CODE_BIN` | directory of the `forgel-code` launcher (default `~/.local/bin`) |
-| `FORGEL_CODE_PROFILE` | shell profile that receives the `PATH` block |
+| `FORGEL_CODE_PROFILE` | shell profile that receives the `PATH` block, instead of the detected one |
 | `FORGEL_CODE_NO_MODIFY_PATH` | set it to leave the shell profile untouched |
 | `FORGEL_CODE_SOURCE` | install from a local checkout instead of the network |
 
-With `FORGEL_CODE_NO_MODIFY_PATH=1` no profile is opened for writing; the
-installer prints the exact `export PATH=...` line to add yourself.
+With `FORGEL_CODE_NO_MODIFY_PATH=1` no profile file is opened for writing; the
+installer prints the exact line to add yourself and exits with code 0.
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 ```sh
 FORGEL_CODE_SOURCE=/path/to/code sh install.sh
@@ -62,6 +87,11 @@ curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh |
 ```sh
 curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh | sh -s -- --uninstall
 ```
+
+The uninstall removes the installation prefix, the `forgel-code` launcher and
+the marked `PATH` block from every profile file this installer can have written:
+`~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bash_login` and
+`~/.profile`. The rest of each of those files is left unchanged.
 
 Windows is not the main installation method; the fallback there is `python -m pip install --user` of the pinned revision.
 

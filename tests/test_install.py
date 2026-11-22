@@ -30,6 +30,16 @@ PROFILE_NAMES = (
     ".kshrc",
 )
 
+# Every profile file an uninstall cleans, wherever an install put the block.
+CANDIDATE_PROFILES = (
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+)
+
 # Copying the checkout keeps the build away from the real tree and from
 # leftovers of an interrupted run, exactly like the packaging tests do.
 IGNORED = shutil.ignore_patterns(
@@ -46,6 +56,21 @@ IGNORED = shutil.ignore_patterns(
 
 TIMEOUT = 600
 SCRIPT_NAMES = ("forgel-code", "forgel-code.exe", "forgel-code-script.py")
+
+# The stub for the macOS Directory Service call, exactly as the external
+# dependency records it. It answers ``dscl . -read <home> UserShell`` from
+# FORGEL_STUB_USER_SHELL, so the macOS branch is deterministic off macOS.
+DSCL_STUB = """#!/bin/sh
+# Deterministic test stub for the macOS Directory Service call:
+#   dscl . -read "$HOME" UserShell
+# The shell is selected by FORGEL_STUB_USER_SHELL (default /bin/zsh).
+if [ "$#" -ne 4 ] || [ "$1" != "." ] || [ "$2" != "-read" ] || [ "$4" != "UserShell" ]; then
+    printf '%s\\n' 'dscl stub: supports only: dscl . -read <home> UserShell' >&2
+    exit 64
+fi
+shell=${FORGEL_STUB_USER_SHELL:-/bin/zsh}
+printf 'UserShell: %s\\n' "$shell"
+"""
 
 
 def _source_version() -> str:
@@ -73,6 +98,7 @@ def _clean_environment() -> dict:
         "FORGEL_CODE_NO_PROFILE_EDIT",
         "FORGEL_CODE_TIMEOUT",
         "FORGEL_STUB_MODE",
+        "FORGEL_STUB_USER_SHELL",
         "PYTHONPATH",
         "PIP_INDEX_URL",
         "PIP_EXTRA_INDEX_URL",
@@ -143,6 +169,33 @@ def _installer_environment(home: Path, **extra) -> dict:
     env["FORGEL_CODE_PYTHON"] = _install_python()
     env.update(extra)
     return env
+
+
+def _write_dscl_stub(directory: Path) -> Path:
+    """The macOS Directory Service stub, first on PATH for the detection tests."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "dscl"
+    stub.write_text(DSCL_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
+def _fresh_login_shell(shell, home: Path) -> subprocess.CompletedProcess:
+    """The shell as a login interactive shell started from a cleared environment."""
+    return subprocess.run(
+        [str(shell), "-l", "-i", "-c", "command -v forgel-code"],
+        cwd=str(home),
+        env={
+            "HOME": str(home),
+            "SHELL": str(shell),
+            "TERM": "dumb",
+            "PATH": "/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+    )
 
 
 def _installed_version(target: Path) -> str:
@@ -257,6 +310,28 @@ class InstallerTest(InstallerCase):
         self.assertIn(MARKER_END, text)
         self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, text)
 
+    def test_install_reports_the_shell_profile_and_the_fresh_check(self) -> None:
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("/bin/sh", result.stdout)
+        self.assertIn(str(self.profile), result.stdout)
+        self.assertIn(
+            "Fresh login shell check: command -v forgel-code -> %s" % self.launcher,
+            result.stdout,
+        )
+
+    def test_profile_the_login_shell_ignores_fails_verification(self) -> None:
+        ignored = self.home / ".ignored_profile"
+        env = dict(self.env)
+        env["FORGEL_CODE_PROFILE"] = str(ignored)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(str(ignored), result.stderr)
+        self.assertIn(MARKER_START, result.stderr)
+        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, result.stderr)
+        self.assertEqual(_marker_count(ignored), 1)
+        self.assertNotIn("PATH block written", result.stdout)
+
     def test_second_run_is_idempotent(self) -> None:
         first = self.install()
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -295,6 +370,104 @@ class InstallerTest(InstallerCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("python", result.stderr.lower())
         self.assertFalse(self.launcher.exists())
+
+
+class InstallerShellDetectionTest(InstallerCase):
+    """The edited profile follows the login shell, not $SHELL alone."""
+
+    def detection_environment(self, **extra) -> dict:
+        """The base environment with an unusable $SHELL and the targets kept."""
+        env = dict(self.env)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        # An empty $SHELL is the unusable value a login shell reports when the
+        # invoking process lost it; a removed one is re-exported by the shell.
+        env["SHELL"] = ""
+        env.update(extra)
+        return env
+
+    def test_unset_shell_puts_the_block_in_zshrc(self) -> None:
+        zsh = shutil.which("zsh")
+        if not zsh:
+            self.skipTest("zsh is not installed")
+        stub_dir = self.base / "stubs"
+        _write_dscl_stub(stub_dir)
+        env = self.detection_environment(
+            FORGEL_STUB_USER_SHELL=zsh,
+            PATH=os.pathsep.join(
+                [str(stub_dir), os.environ.get("PATH", "/usr/bin:/bin")]
+            ),
+        )
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        zshrc = self.home / ".zshrc"
+        self.assertTrue(
+            zshrc.is_file(),
+            "no .zshrc in the temporary HOME; the installer said:\n%s\n%s\nhome: %s"
+            % (
+                result.stdout,
+                result.stderr,
+                sorted(path.name for path in self.home.iterdir()),
+            ),
+        )
+        self.assertEqual(_marker_count(zshrc), 1)
+        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, zshrc.read_text())
+        self.assertFalse(
+            (self.home / ".profile").exists(),
+            "the installer fell back to ~/.profile",
+        )
+        self.assertIn("Login shell: %s" % zsh, result.stdout)
+
+        fresh = _fresh_login_shell(zsh, self.home)
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        lines = [line for line in fresh.stdout.splitlines() if line.strip()]
+        self.assertTrue(lines, "the fresh zsh printed nothing: %s" % fresh.stderr)
+        self.assertEqual(Path(lines[-1]).resolve(), self.launcher.resolve())
+
+    def test_bash_uses_an_existing_bash_profile(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        profile = self.home / ".bash_profile"
+        profile.write_text("export EDITOR=vi\n", encoding="utf-8")
+        env = self.detection_environment(SHELL=bash)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        text = profile.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("export EDITOR=vi\n"), text)
+        self.assertEqual(_marker_count(profile), 1)
+        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, text)
+        self.assertFalse(
+            (self.home / ".bashrc").exists(),
+            "the installer created ~/.bashrc for a login bash",
+        )
+
+    def test_bash_creates_a_bash_profile_when_none_exists(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not installed")
+        env = self.detection_environment(SHELL=bash)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        profile = self.home / ".bash_profile"
+        self.assertTrue(profile.is_file(), "no ~/.bash_profile was created")
+        self.assertEqual(_marker_count(profile), 1)
+        self.assertIn('export PATH="%s:$PATH"' % self.bin_dir, profile.read_text())
+        for name in (".bashrc", ".bash_login"):
+            self.assertFalse(
+                (self.home / name).exists(), "the installer created %s" % name
+            )
 
 
 class InstallerOptOutTest(InstallerCase):
@@ -378,6 +551,34 @@ class InstallerUninstallTest(InstallerCase):
         self.assertEqual(
             self.profile.read_text(encoding="utf-8"), "export EDITOR=vi\n"
         )
+
+    def test_uninstall_clears_every_candidate_profile(self) -> None:
+        touched = {}
+        for name in CANDIDATE_PROFILES:
+            path = self.home / name
+            path.write_text(
+                "export EDITOR=vi\n"
+                "%s\n"
+                'export PATH="%s:$PATH"\n'
+                "%s\n" % (MARKER_START, self.bin_dir, MARKER_END),
+                encoding="utf-8",
+            )
+            touched[name] = path
+        installed = self.install()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+
+        result = self.install("--uninstall")
+        self.assertEqual(
+            result.returncode,
+            0,
+            "uninstall failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        for name, path in touched.items():
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                "export EDITOR=vi\n",
+                "%s kept the PATH block" % name,
+            )
 
 
 class PlainPipInstallTest(unittest.TestCase):
