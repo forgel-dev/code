@@ -185,6 +185,34 @@ def _write_dscl_stub(directory: Path) -> Path:
     return stub
 
 
+def _shell_that_keeps_shell_unset(env) -> str | None:
+    """A shell interpreter that leaves an unset ``SHELL`` unset.
+
+    ``bash`` assigns ``SHELL`` from the account database when it starts without
+    one, so a script interpreted by it never sees an unset value. Hosts whose
+    only shell does that cannot run the unset case, and other shells are tried
+    first.
+    """
+    probe = 'printf "%s" "${SHELL-}"'
+    for name in ("dash", "ksh", "ksh93", "mksh", "yash", "ash", "zsh"):
+        found = shutil.which(name)
+        if not found:
+            continue
+        try:
+            result = subprocess.run(
+                [found, "-c", probe],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and result.stdout == "":
+            return found
+    return None
+
+
 def _fresh_login_shell(shell, home: Path) -> subprocess.CompletedProcess:
     """The shell as a login interactive shell started from a cleared environment."""
     return subprocess.run(
@@ -396,6 +424,29 @@ class InstallerTest(InstallerCase):
         self.assertEqual(_marker_count(ignored), 1)
         self.assertNotIn("PATH block written", result.stdout)
 
+    def test_profile_the_login_shell_ignores_fails_verification(self) -> None:
+        """A block in a file the login shell never reads fails the check."""
+        ignored = self.home / ".bashrc"
+        env = dict(self.env)
+        env["FORGEL_CODE_PROFILE"] = str(ignored)
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            "install.sh claimed success for a profile /bin/sh does not read:\n%s"
+            % result.stdout,
+        )
+        self.assertIn("did not put forgel-code on PATH", result.stderr)
+        self.assertIn(str(ignored), result.stderr)
+        self.assertIn("login shell: /bin/sh", result.stderr)
+        self.assertIn(MARKER_START, result.stderr)
+        self.assertIn(_guarded_line(self.bin_dir), result.stderr)
+        self.assertIn("PATH in the fresh shell:", result.stderr)
+        self.assertEqual(_marker_count(ignored), 1)
+        self.assertFalse(
+            self.profile.exists(), "the installer edited a second profile"
+        )
+
     def test_repeated_install_keeps_one_block_and_one_path_entry(self) -> None:
         first = self.install()
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -429,6 +480,29 @@ class InstallerTest(InstallerCase):
             1,
             "the launcher directory appears more than once in %s" % path_value,
         )
+
+    def test_second_run_is_idempotent(self) -> None:
+        """Running the installer again leaves the profile exactly as it was."""
+        first = self.install()
+        self.assertEqual(
+            first.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (first.stdout, first.stderr),
+        )
+        after_first = self.profile.read_text(encoding="utf-8")
+        self.assertEqual(_marker_count(self.profile), 1)
+
+        second = self.install()
+        self.assertEqual(
+            second.returncode,
+            0,
+            "the second install.sh failed:\n%s\n%s"
+            % (second.stdout, second.stderr),
+        )
+        self.assertEqual(self.profile.read_text(encoding="utf-8"), after_first)
+        self.assertEqual(_marker_count(self.profile), 1)
+        self.assertNotIn(_unguarded_line(self.bin_dir), after_first)
+        self.assert_installed()
 
     def test_guard_keeps_one_entry_when_several_profiles_are_sourced(self) -> None:
         """Sourcing each profile that carries the block adds the entry once."""
@@ -488,6 +562,32 @@ class InstallerTest(InstallerCase):
             _resolved_by("/bin/sh", self.home), self.launcher.resolve()
         )
 
+    def test_piped_install_does_not_read_the_script_from_stdin(self) -> None:
+        """The installer leaves the rest of stdin to the shell that read it."""
+        script = INSTALL_SH.read_text(encoding="utf-8")
+        tail = 'printf "forgel-stdin-tail-ok\\n"\n'
+        result = subprocess.run(
+            ["sh"],
+            cwd=str(self.base),
+            env=self.env,
+            input=script + "\n" + tail,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            "piped install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertIn(
+            "forgel-stdin-tail-ok",
+            result.stdout,
+            "the installer consumed the lines after the script on stdin",
+        )
+        self.assert_installed()
+        self.assertEqual(_marker_count(self.profile), 1)
+
     def test_missing_interpreter_fails_with_a_message(self) -> None:
         env = dict(self.env)
         env["FORGEL_CODE_PYTHON"] = str(self.base / "no-such-python")
@@ -510,7 +610,12 @@ class InstallerShellDetectionTest(InstallerCase):
         env.update(extra)
         return env
 
-    def test_zsh_without_shell_puts_the_block_in_zshrc(self) -> None:
+    def zsh_environment(self):
+        """A detection environment whose account login shell is ``zsh``.
+
+        The macOS Directory Service stub answers for the account entry, so the
+        branch is exercised on every host that has zsh installed.
+        """
         zsh = shutil.which("zsh")
         if not zsh:
             self.skipTest("zsh is not installed")
@@ -522,6 +627,10 @@ class InstallerShellDetectionTest(InstallerCase):
                 [str(stub_dir), os.environ.get("PATH", "/usr/bin:/bin")]
             ),
         )
+        return zsh, env
+
+    def test_zsh_without_shell_puts_the_block_in_zshrc(self) -> None:
+        zsh, env = self.zsh_environment()
         result = _run(["sh", str(INSTALL_SH)], self.base, env)
         self.assertEqual(
             result.returncode,
@@ -543,6 +652,47 @@ class InstallerShellDetectionTest(InstallerCase):
         self.assertFalse(
             (self.home / ".profile").exists(),
             "the installer fell back to ~/.profile",
+        )
+        self.assertIn("Login shell: %s" % zsh, result.stdout)
+        self.assertEqual(_resolved_by(zsh, self.home), self.launcher.resolve())
+
+    def test_unset_shell_puts_the_block_in_zshrc(self) -> None:
+        """Without $SHELL at all the account login shell still decides."""
+        zsh, env = self.zsh_environment()
+        env.pop("SHELL", None)
+        interpreter = _shell_that_keeps_shell_unset(env)
+        if interpreter is None:
+            self.skipTest(
+                "every installed shell assigns SHELL from the account database "
+                "when it starts without one, so an unset SHELL cannot reach "
+                "the installer on this host"
+            )
+        result = _run([interpreter, str(INSTALL_SH)], self.base, env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            "install.sh failed:\n%s\n%s" % (result.stdout, result.stderr),
+        )
+        zshrc = self.home / ".zshrc"
+        self.assertTrue(
+            zshrc.is_file(),
+            "no .zshrc in the temporary HOME; the installer said:\n%s\n%s\n"
+            "home: %s"
+            % (
+                result.stdout,
+                result.stderr,
+                sorted(path.name for path in self.home.iterdir()),
+            ),
+        )
+        self.assertEqual(_marker_count(zshrc), 1)
+        self.assertIn(_guarded_line(self.bin_dir), zshrc.read_text())
+        self.assertFalse(
+            (self.home / ".profile").exists(),
+            "the installer fell back to ~/.profile without a shell to name",
+        )
+        self.assertFalse(
+            (self.home / ".bash_profile").exists(),
+            "an unset $SHELL produced a bash decision",
         )
         self.assertIn("Login shell: %s" % zsh, result.stdout)
         self.assertEqual(_resolved_by(zsh, self.home), self.launcher.resolve())
