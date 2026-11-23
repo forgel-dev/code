@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Make the whole test suite fit the release audit's two-minute bound without weakening a test — the expensive duplicated work is gone instead of a scenario: one read-only checkout copy and one prepared installation per scenario group are shared by the tests that only read them, and the bounded-check cases configure a one-second limit below the product default. The README `## Tests` section now states the runtime bound and that the documented command runs the whole suite.
+- Speed up the suite without weakening a test — the expensive duplicated work is gone instead of a scenario: one read-only checkout copy and one prepared installation per scenario group are shared by the tests that only read them, and the bounded-check cases configure a limit below the product default.
+- Remove every statement of a suite completion time, duration or runtime bound from the documentation — the README `## Tests` section still says that one documented command runs the whole suite, that the installer situations are covered by a real installation into a throwaway home location with a real detected login shell, and that a run from a source checkout needs only the Python standard library and no network access, but it no longer promises how long such a run takes.
 
 ### Fixed
 

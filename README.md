@@ -195,17 +195,17 @@ begins with a hyphen.
 
 ## Tests
 
-From a checkout the suite needs nothing but the Python standard library:
+From a checkout the suite needs nothing but the Python standard library and no
+network access:
 
 ```sh
 python -m unittest discover -s tests
 ```
 
 That command runs the whole suite — no environment variable, marker or default
-option leaves a test out — and it completes in under 120 seconds (about two
-minutes) on a development machine. That budget covers the installer scenarios
-too, which run the real `install.sh` with a real install through `pip` into a
-temporary home directory and a real detected login shell.
+option leaves a test out — and it covers the installer scenarios too, which run
+the real `install.sh` with a real install through `pip` into a temporary home
+directory and a real detected login shell.
 
 Installing the client with its `test` extra brings the pytest the wheel
 declares, so a pinned revision can run the same suite too:
