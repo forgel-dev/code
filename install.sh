@@ -14,15 +14,15 @@
 # $HOME/.profile and a warning that names the edited file. After writing the
 # block the installer starts that shell as a login interactive shell from a
 # cleared environment, in a process group of its own, under a hard time limit.
-# A watchdog enforces that limit and is the only authority on whether it
-# elapsed: it records its decision in the private check directory, and the
-# installer reads the outcome only once that decision exists. A shell still
-# running when the limit elapses therefore fails the installation, whatever the
-# ordering of its exit and the decision. Nothing the check started outlives it:
-# the dedicated group, and the descendants that left it, are stopped on every
-# exit path. The installer then checks that ``forgel-code`` resolves to the
-# launcher it just wrote. Re-running replaces the installation; running with
-# ``--uninstall`` removes it again.
+# A watchdog stops that shell once the limit elapses, and the installer times
+# the check itself: a shell that outlived the limit fails the installation,
+# whatever the ordering of its own exit and the watchdog's timeout record. The
+# absence of a recorded timeout at the moment the check's result arrives is
+# never taken as evidence that the check kept its bound. Nothing the check
+# started outlives it: the dedicated group, and the descendants that left it,
+# are stopped on every exit path. The installer then checks that
+# ``forgel-code`` resolves to the launcher it just wrote. Re-running replaces
+# the installation; running with ``--uninstall`` removes it again.
 #
 # Environment variables:
 #   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
@@ -482,6 +482,37 @@ verify_limit() {
     printf '%s\n' "$configured"
 }
 
+# The current time in milliseconds, so the check can be timed. A ``date`` with
+# nanoseconds answers with them; one without that extension (macOS writes the
+# literal ``N``) falls back to the interpreter the installer already requires,
+# and to whole seconds only when nothing finer answers. A host with no usable
+# clock reports 0, and the verdict is then the recorded timeout alone.
+now_millis() {
+    stamp=$(date +%s%N 2>/dev/null) || stamp=
+    case $stamp in
+        ''|*[!0-9]*) stamp= ;;
+    esac
+    if [ "${#stamp}" -ge 19 ]; then
+        printf '%s\n' "$((stamp / 1000000))"
+        return 0
+    fi
+    if [ -n "${PYTHON:-}" ]; then
+        stamp=$("$PYTHON" -c 'import time; print(int(time.time() * 1000))' 2>/dev/null) || stamp=
+        case $stamp in
+            ''|*[!0-9]*) stamp= ;;
+        esac
+        if [ -n "$stamp" ]; then
+            printf '%s\n' "$stamp"
+            return 0
+        fi
+    fi
+    stamp=$(date +%s 2>/dev/null) || stamp=
+    case $stamp in
+        ''|*[!0-9]*) stamp=0 ;;
+    esac
+    printf '%s\n' "$((stamp * 1000))"
+}
+
 # An unpredictable name component, so the check directory cannot be guessed
 # and pre-created by another user.
 random_token() {
@@ -657,11 +688,13 @@ check_interrupted() {
 }
 
 # Wait, for a bounded moment, until the watchdog has recorded its decision in
-# the private check directory: ``timed-out`` when the bound elapsed before the
-# checked command exited, ``finished`` when the command won that race. Status 0
-# means the decision is there, 1 that the watchdog did not answer within
-# DECISION_WAIT seconds. The wait never depends on the checked command, so a
-# watchdog that never answers delays the installer by that fixed limit at most.
+# the private check directory: ``timed-out`` when the bound had elapsed before
+# the checked command exited, ``finished`` when it saw the command gone first.
+# Status 0 means the decision is there, 1 that the watchdog did not answer
+# within DECISION_WAIT seconds. The decision says which stop to expect; it is
+# not the verdict, which is the time the check took (see ``bounded_run``). The
+# wait never depends on the checked command, so a watchdog that never answers
+# delays the installer by that fixed limit at most.
 await_decision() {
     decision_dir=$1
     waited=0
@@ -679,15 +712,17 @@ await_decision() {
 
 # Run a command under a hard time bound. ``timeout`` from GNU coreutils is not
 # required and is not used: the command runs in the background and a watchdog
-# bounds it. The watchdog is also the only authority on whether the bound
-# elapsed: it records ``timed-out`` in the private directory before it starts
-# the graceful stop, and ``finished`` when it sees the command gone before the
-# bound. The caller waits, for at most DECISION_WAIT seconds, until that
-# decision exists and only then reads the outcome, so the ordering between the
-# command's exit and the marker write cannot turn a timed-out check into a
-# success. After the graceful stop the watchdog forcefully stops the rest of the
-# checked command's process group once the grace period has passed. Nothing the
-# function starts survives it. CHECK_STATUS is 124 when the bound elapsed.
+# stops it once the bound elapsed. The watchdog records ``timed-out`` in the
+# private directory before it starts the graceful stop, and ``finished`` when it
+# saw the command gone before the bound; that record says which stop to expect,
+# never what the verdict is. The installer times the check itself and reports a
+# timeout whenever the measured time reached the bound, so the ordering between
+# the command's own exit, the record and the read of the result cannot turn a
+# step that overran into a success. A command that finished inside the bound
+# keeps its own status, a nonzero one included. After the graceful stop the
+# watchdog forcefully stops the rest of the checked command's process group once
+# the grace period has passed. Nothing the function starts survives it.
+# CHECK_STATUS is 124 when the bound elapsed.
 #
 # The checked command leads a process group of its own (see ``start_check``), so
 # the group is what the cleanup signals, on the success path as much as on the
@@ -714,6 +749,7 @@ bounded_run() {
         cleanup_check
         return 1
     fi
+    started=$(now_millis)
     start_check "$out" "$@"
     umask "$saved_umask"
     child=$CHECK_CHILD
@@ -729,8 +765,8 @@ bounded_run() {
             sleeper=
             elapsed=$((elapsed + 1))
             if ! kill -0 "$child" 2>/dev/null; then
-                # The command finished inside the bound; record that decision
-                # so the caller never has to infer it from the exit alone.
+                # The command was gone inside the bound; record that so the
+                # caller knows which stop to expect.
                 : > "$finished" 2>/dev/null || true
                 exit 0
             fi
@@ -742,19 +778,25 @@ bounded_run() {
     ) &
     CHECK_WATCHER=$!
     wait "$child" || CHECK_STATUS=$?
+    ended=$(now_millis)
+    measured=$((ended - started))
     if await_decision "$CHECK_DIR"; then
-        if [ -e "$timed_out" ]; then
-            CHECK_STATUS=124
-        fi
         # The watchdog records its decision before it stops anything, so on
         # the timeout path it may still own the graceful then the forceful
         # stop; let it finish so nothing outlives the check.
         wait "$CHECK_WATCHER" 2>/dev/null || true
     else
-        # A watchdog that never answers is not allowed to hold the installer,
-        # and a decision that never arrives is never a successful check.
+        # A watchdog that never answers is not allowed to hold the installer. A
+        # decision that never arrives is not evidence that the bound was kept;
+        # the measured time decides that below.
         kill -KILL "$CHECK_WATCHER" 2>/dev/null || true
         wait "$CHECK_WATCHER" 2>/dev/null || true
+    fi
+    # The verdict is the time the check took, never the presence of a record: a
+    # step that outlived the bound is a timeout even when it exited on its own
+    # before the timeout was recorded, and a step inside the bound keeps its own
+    # status, a nonzero one included.
+    if [ -e "$timed_out" ] || [ "$measured" -ge "$((limit * 1000))" ]; then
         CHECK_STATUS=124
     fi
     CHECK_OUTPUT=$(cat "$out") || CHECK_OUTPUT=
