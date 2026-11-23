@@ -109,6 +109,53 @@ rest of each edited file is left unchanged.
 
 Windows is not the main installation method; the fallback there is `python -m pip install --user` of the pinned revision.
 
+## Interactive session
+
+Starting `forgel-code` with no arguments opens an interactive session instead of
+printing usage text. It shows a prompt and stays open until you leave, so you
+work by writing sentences rather than by translating every intent into a
+command.
+
+Each sentence is handed to the engine's project agent as one free-form request
+and the agent's answer is shown in the session. The session also shows the
+project it is working on, and re-reads the task and release state from the
+engine on its own, so progress becomes visible without asking for a status
+again.
+
+Some sentences ask the session for one specific action:
+
+| You write | What the session asks the engine for |
+| --- | --- |
+| a plain sentence | the project agent's answer |
+| `plan <goal>` | a plan for the goal, shown with its tasks in plan order and their states |
+| `accept <task>` | accepting that task |
+| `rework <task> <remarks>` | sending that task back with the remarks |
+| `retry <task>` | retrying that task |
+| `pause` | pausing work |
+| `resume` | resuming work |
+| `switch to <key>` | selecting another project; every later request and every later state shown uses the new project |
+| `leave`, `exit`, `quit`, or the end of the input | ending the session |
+
+A sentence that names no action, or more than one, gets a clarification and
+nothing is carried out. A request that becomes a plan shows its tasks in plan
+order, and one that becomes a task shows that task with its title and state.
+When an engine call fails, the session shows the reason and the next possible
+step and stays usable for the next request; leaving after a failure needs no
+restart. Replies follow the language of your message.
+
+Adopting a repository, creating a project, setting or changing a secret and
+changing configuration are not part of the conversation. A sentence never
+carries them out; the session only points you to the explicit command for them.
+
+Leaving ends the session at once: the client sends nothing further to the
+engine and keeps no transcript. Key material never reaches the screen, because
+a value that names a secret is replaced before it is shown.
+
+The interactive session adds no capability of its own: every answer and every
+piece of state comes from the engine, and the client still calls no model, reads
+no project and runs no check. All commands below keep working one-shot, with the
+same output, exit status and `--json` form as before.
+
 ## Commands
 
 Every client command is a thin wrapper over an existing engine command, and

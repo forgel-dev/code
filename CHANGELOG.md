@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Open an interactive session when the client starts with no arguments — `forgel-code` now shows a prompt and stays open instead of printing usage text. A sentence typed at the prompt is handed to the engine's project agent as one free-form request and the agent's answer is shown in the session. The session shows the selected project and lets the owner switch it without leaving, shows a plan as its ordered tasks with their states and a new task with its title and state, and re-reads the task and release state from the engine on its own so progress appears without asking for a status. Accepting a task, sending it back with remarks, retrying a failed task, pausing and resuming work are asked for in plain language, an ambiguous or unmatched request gets a clarification and performs nothing, a failure shows the reason and the next possible step while the session stays usable, and replies follow the language of the owner's message. Adopting a repository, creating a project, secrets and configuration stay explicit separate actions that a sentence never triggers, key material never reaches the screen, and leaving — or the end of the input — ends the session at once. The session adds no capability: every answer and every piece of state still comes from the engine, and every one-shot usage keeps its previous output, exit status and `--json` form.
+
 ### Changed
 
 - Speed up the suite without weakening a test — the expensive duplicated work is gone instead of a scenario: one read-only checkout copy and one prepared installation per scenario group are shared by the tests that only read them, and the bounded-check cases configure a limit below the product default.

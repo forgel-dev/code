@@ -2,7 +2,8 @@
 
 Every command is a thin wrapper over an existing engine command invoked as
 ``forgel <command> --json``. The client never imports the engine and never
-invents behaviour the engine does not provide.
+invents behaviour the engine does not provide. Starting the client with no
+arguments opens the interactive session instead of printing usage text.
 """
 
 from __future__ import annotations
@@ -144,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="forgel-code",
         description=(
             "Thin console client for Forgel over the engine's machine-readable "
-            "commands."
+            "commands. Run it without a command to open the interactive session."
         ),
         parents=[global_options],
     )
@@ -352,8 +353,19 @@ def _json_requested(raw: Sequence[str]) -> bool:
     return "--json" in raw
 
 
+def run_interactive() -> int:
+    """Open the interactive session the client falls into with no arguments."""
+    from .interactive import run
+
+    return run()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if not raw:
+        # No arguments is the interactive session, never a usage error.
+        return run_interactive()
+
     parser = build_parser()
     try:
         args = parser.parse_args(raw)
