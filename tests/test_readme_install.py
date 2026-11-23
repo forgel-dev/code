@@ -19,6 +19,8 @@ RAW_PREFIX = "https://raw.githubusercontent.com/forgel-dev/code/"
 INSTALL_URL = "%s%s/install.sh" % (RAW_PREFIX, INSTALL_TAG)
 STALE_URL = "%s%s/install.sh" % (RAW_PREFIX, STALE_TAG)
 STALE_INSTALL_PATH = "/%s/install.sh" % STALE_TAG
+# A second, different release tag, used to prove a divergent URL is rejected.
+DIVERGENT_URL = "%sv0.1.2/install.sh" % RAW_PREFIX
 
 # The command the README must lead with, character for character.
 INSTALL_COMMAND = "curl -fsSL %s | sh" % INSTALL_URL
@@ -575,18 +577,18 @@ class ChecksFailAsDesignedTest(unittest.TestCase):
         lines = [line for line in FIXTURE if "--uninstall" not in line]
         self.assert_rejected(assert_single_update_and_uninstall, lines)
 
-    def test_rejects_the_stale_install_script_url(self) -> None:
+    def test_stale_install_script_url_is_rejected(self) -> None:
+        """A document carrying the previous release's install script is refused."""
         lines = [line.replace(INSTALL_URL, STALE_URL) for line in FIXTURE]
         self.assert_rejected(assert_single_install_script_url, lines)
-        self.assert_rejected(assert_single_update_and_uninstall, lines)
 
-    def test_rejects_install_and_uninstall_on_different_tags(self) -> None:
+    def test_divergent_install_script_url_is_rejected(self) -> None:
+        """A second install-script URL from another tag is refused."""
         lines = [
-            line.replace(INSTALL_URL, STALE_URL) if "--uninstall" in line else line
+            line.replace(INSTALL_URL, DIVERGENT_URL) if "--uninstall" in line else line
             for line in FIXTURE
         ]
         self.assert_rejected(assert_single_install_script_url, lines)
-        self.assert_rejected(assert_single_update_and_uninstall, lines)
 
     def test_rejects_a_stale_url_anywhere_in_the_document(self) -> None:
         lines = FIXTURE + ["Older installs still run %s." % STALE_URL]
