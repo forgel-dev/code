@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import atexit
+import functools
 import os
 import re
 import shutil
@@ -63,7 +65,9 @@ IGNORED = shutil.ignore_patterns(
     "*.pyc",
 )
 
-TIMEOUT = 600
+# The bound of every external command these tests start. It is well below the
+# suite's own runtime bound, so no single waiting step can consume it.
+TIMEOUT = 60
 SCRIPT_NAMES = ("forgel-code", "forgel-code.exe", "forgel-code-script.py")
 
 # The prefix of the private directory the bounded check creates.
@@ -108,6 +112,23 @@ exit 127
 
 # An invocation of GNU ``timeout`` or of its macOS name, never its mention.
 TIMEOUT_INVOCATION = re.compile(r"(?:^|[\s;&|(`\"'])g?timeout\s+(?:\d|--)")
+
+
+# One read-only copy of the checkout, shared by every installation test: pip
+# only reads the tree it installs, so building it once per run is enough.
+_SHARED_SOURCE: Path | None = None
+
+
+def _shared_source() -> Path:
+    """The read-only checkout copy every scenario installs from."""
+    global _SHARED_SOURCE
+    if _SHARED_SOURCE is None:
+        directory = Path(tempfile.mkdtemp(prefix="forgel-code-source-"))
+        atexit.register(shutil.rmtree, directory, True)
+        source = directory / "source"
+        shutil.copytree(ROOT, source, ignore=IGNORED)
+        _SHARED_SOURCE = source
+    return _SHARED_SOURCE
 
 
 def _source_version() -> str:
@@ -157,12 +178,14 @@ def _candidate_pythons():
             yield found
 
 
+@functools.lru_cache(maxsize=1)
 def _install_python() -> str:
     """A Python 3.9+ with pip, which is what the installer requires.
 
     The interpreter that runs the suite is not always the one that owns the
     client: a test runner installed for an older Python is a valid host for
-    these tests, and the installer refuses an interpreter that is too old.
+    these tests, and the installer refuses an interpreter that is too old. The
+    answer is the same for every scenario, so it is probed once per run.
     """
     for candidate in _candidate_pythons():
         try:
@@ -347,15 +370,11 @@ def _marked_block(bin_dir: Path) -> str:
     )
 
 
-class InstallerCase(unittest.TestCase):
-    """A temp HOME with the real installer run against a local source tree."""
+class _Installation:
+    """The directories one real ``install.sh`` run works on."""
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="forgel-code-installer-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.base = Path(self.tmp)
-        self.source = self.base / "source"
-        shutil.copytree(ROOT, self.source, ignore=IGNORED)
+    def __init__(self) -> None:
+        self.base = Path(tempfile.mkdtemp(prefix="forgel-code-installer-"))
         self.home = self.base / "home"
         self.home.mkdir()
         self.prefix = self.base / "prefix"
@@ -364,11 +383,62 @@ class InstallerCase(unittest.TestCase):
         self.launcher = self.bin_dir / "forgel-code"
         self.env = _installer_environment(
             self.home,
-            FORGEL_CODE_SOURCE=str(self.source),
+            FORGEL_CODE_SOURCE=str(_shared_source()),
             FORGEL_CODE_HOME=str(self.prefix),
             FORGEL_CODE_BIN=str(self.bin_dir),
             FORGEL_CODE_PROFILE=str(self.profile),
         )
+
+    def install(self, *args) -> subprocess.CompletedProcess:
+        return _run(["sh", str(INSTALL_SH), *args], self.base, self.env)
+
+    def remove(self) -> None:
+        shutil.rmtree(self.base, ignore_errors=True)
+
+
+class InstallerCase(unittest.TestCase):
+    """A temp HOME with the real installer run against a local source tree."""
+
+    # One real installation per class: the first test that calls
+    # ``plain_install`` runs ``install.sh`` and every later caller reads that
+    # same result, so a group of checks on one installation pays for it once.
+    _plain_installation = None
+    _plain_result = None
+
+    def setUp(self) -> None:
+        self.own_installation = _Installation()
+        self.addCleanup(self.own_installation.remove)
+        self.use_installation(self.own_installation)
+
+    def use_installation(self, installation: _Installation) -> None:
+        """Point this test at ``installation`` and the environment it runs in."""
+        self.tmp = str(installation.base)
+        self.base = installation.base
+        self.source = _shared_source()
+        self.home = installation.home
+        self.prefix = installation.prefix
+        self.bin_dir = installation.bin_dir
+        self.profile = installation.profile
+        self.launcher = installation.launcher
+        self.env = installation.env
+
+    def plain_install(self) -> subprocess.CompletedProcess:
+        """The one real installation this group of tests only reads."""
+        cls = type(self)
+        if cls._plain_installation is None:
+            installation = _Installation()
+            result = installation.install()
+            if result.returncode != 0:
+                installation.remove()
+                raise AssertionError(
+                    "the shared install.sh run failed:\n%s\n%s"
+                    % (result.stdout, result.stderr)
+                )
+            atexit.register(installation.remove)
+            cls._plain_installation = installation
+            cls._plain_result = result
+        self.use_installation(cls._plain_installation)
+        return cls._plain_result
 
     def install(self, *args) -> subprocess.CompletedProcess:
         return _run(["sh", str(INSTALL_SH), *args], self.base, self.env)
@@ -407,7 +477,7 @@ class InstallerTest(InstallerCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_install_exits_zero_and_prints_the_version(self) -> None:
-        result = self.install()
+        result = self.plain_install()
         self.assertEqual(
             result.returncode,
             0,
@@ -416,18 +486,18 @@ class InstallerTest(InstallerCase):
         self.assertIn("forgel-code %s" % _source_version(), result.stdout)
 
     def test_install_creates_the_launcher_in_the_bin_directory(self) -> None:
-        result = self.install()
+        result = self.plain_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_installed()
 
     def test_launcher_prints_the_installed_version(self) -> None:
-        result = self.install()
+        result = self.plain_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_installed()
         self.assertEqual(_installed_version(self.prefix), _source_version())
 
     def test_profile_gets_one_marked_path_block(self) -> None:
-        result = self.install()
+        result = self.plain_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.profile.read_text(encoding="utf-8")
         self.assertEqual(_marker_count(self.profile), 1, text)
@@ -440,7 +510,7 @@ class InstallerTest(InstallerCase):
         )
 
     def test_install_reports_the_shell_profile_and_the_fresh_check(self) -> None:
-        result = self.install()
+        result = self.plain_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("/bin/sh", result.stdout)
         self.assertIn(str(self.profile), result.stdout)
@@ -451,7 +521,7 @@ class InstallerTest(InstallerCase):
 
     def test_login_shell_resolves_forgel_code_after_install(self) -> None:
         """A cleared, freshly started login shell finds the launcher unaided."""
-        result = self.install()
+        result = self.plain_install()
         self.assertEqual(
             result.returncode,
             0,
@@ -871,12 +941,14 @@ class InstallerWatchdogTest(InstallerCase):
         env = dict(self.env)
         env.pop("FORGEL_CODE_PROFILE", None)
         env["SHELL"] = str(stub)
+        # One second, below the product default of ten: the case waits for its
+        # own bound, not for the default one.
         env["FORGEL_CODE_TIMEOUT"] = "1"
         started = time.monotonic()
         result = _run(["sh", str(INSTALL_SH)], self.base, env)
         elapsed = time.monotonic() - started
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertLess(elapsed, 90, "the check did not honour its time bound")
+        self.assertLess(elapsed, 30, "the check did not honour its time bound")
         self.assertIn("stopped after 1s", result.stderr)
         self.assertIn("did not put forgel-code on PATH", result.stderr)
         self.assertIn(str(profile), result.stderr)
@@ -910,7 +982,8 @@ class InstallerBoundedCheckTest(InstallerCase):
         stub = _stubborn_shell(self.base / "stubs", pid_file)
         env.pop("FORGEL_CODE_PROFILE", None)
         env["SHELL"] = str(stub)
-        env["FORGEL_CODE_TIMEOUT"] = "2"
+        # One second, below the product default of ten.
+        env["FORGEL_CODE_TIMEOUT"] = "1"
         profile = self.home / ".bash_profile"
 
         started = time.monotonic()
@@ -918,8 +991,8 @@ class InstallerBoundedCheckTest(InstallerCase):
         elapsed = time.monotonic() - started
 
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertLess(elapsed, 60, "the check did not honour its time bound")
-        self.assertIn("stopped after 2s", result.stderr)
+        self.assertLess(elapsed, 30, "the check did not honour its time bound")
+        self.assertIn("stopped after 1s", result.stderr)
         self.assertIn(str(profile), result.stderr)
         self.assertIn("PATH in the fresh shell:", result.stderr)
         self.assertIn("<empty>", result.stderr)
@@ -1272,6 +1345,32 @@ class InstallerBlockRemovalTest(InstallerCase):
 class InstallerOptOutTest(InstallerCase):
     """The opt-out variable keeps every profile file untouched."""
 
+    # The two reading tests describe the same opt-out installation, so it runs
+    # once for the class and both tests inspect that result.
+    _opt_out_installation = None
+    _opt_out_result = None
+
+    def opt_out_install(self) -> subprocess.CompletedProcess:
+        """The one real opt-out installation this group of tests reads."""
+        cls = type(self)
+        if cls._opt_out_installation is None:
+            installation = _Installation()
+            env = dict(installation.env)
+            env["FORGEL_CODE_NO_MODIFY_PATH"] = "1"
+            installation.env = env
+            result = _run(["sh", str(INSTALL_SH)], installation.base, env)
+            if result.returncode != 0:
+                installation.remove()
+                raise AssertionError(
+                    "the shared opt-out install.sh run failed:\n%s\n%s"
+                    % (result.stdout, result.stderr)
+                )
+            atexit.register(installation.remove)
+            cls._opt_out_installation = installation
+            cls._opt_out_result = result
+        self.use_installation(cls._opt_out_installation)
+        return cls._opt_out_result
+
     def profiles(self):
         """Shell profile files in the temporary HOME, created or not."""
         return sorted(
@@ -1279,9 +1378,7 @@ class InstallerOptOutTest(InstallerCase):
         )
 
     def test_opt_out_leaves_the_profile_untouched(self) -> None:
-        env = dict(self.env)
-        env["FORGEL_CODE_NO_MODIFY_PATH"] = "1"
-        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        result = self.opt_out_install()
         self.assertEqual(
             result.returncode,
             0,
@@ -1293,14 +1390,12 @@ class InstallerOptOutTest(InstallerCase):
         self.assertTrue(self.launcher.is_file())
 
     def test_opt_out_writes_nothing_outside_the_target_directories(self) -> None:
-        env = dict(self.env)
-        env["FORGEL_CODE_NO_MODIFY_PATH"] = "1"
-        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        result = self.opt_out_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.profiles(), [], "a shell profile was written")
         self.assertEqual(
             sorted(path.name for path in self.base.iterdir()),
-            ["bin", "home", "prefix", "source"],
+            ["bin", "home", "prefix"],
             "the installer wrote outside its target directories",
         )
         for entry in self.home.iterdir():
@@ -1560,8 +1655,7 @@ class PlainPipInstallTest(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="forgel-code-install-")
         base = Path(cls.tmp)
         cls.base = base
-        cls.source = base / "source"
-        shutil.copytree(ROOT, cls.source, ignore=IGNORED)
+        cls.source = _shared_source()
         cls.target = base / "target"
         cls.target.mkdir()
         cls.python = _install_python()
