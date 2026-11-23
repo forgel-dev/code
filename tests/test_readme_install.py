@@ -9,25 +9,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 
-RAW_PREFIX = "https://raw.githubusercontent.com/forgel-dev/code/"
-# The canonical install-script URL: the default branch, never a release tag, so
-# the documented command cannot freeze at an obsolete release or name a version
-# the project has not published.
-INSTALL_URL = RAW_PREFIX + "main/install.sh"
-# A release tag pinned into an install-script path. The README must never carry
-# one again.
-TAG_PATH_RE = re.compile(r"/v[0-9][^\s/]*/install\.sh")
+# The release whose installer and uninstaller the documentation describes.
+INSTALL_TAG = "v0.1.1"
+# The tag the README named before the installer gained the login-shell handling
+# the documentation promises. It must not come back.
 STALE_TAG = "v0.1.0"
+
+RAW_PREFIX = "https://raw.githubusercontent.com/forgel-dev/code/"
+INSTALL_URL = "%s%s/install.sh" % (RAW_PREFIX, INSTALL_TAG)
+STALE_URL = "%s%s/install.sh" % (RAW_PREFIX, STALE_TAG)
 STALE_INSTALL_PATH = "/%s/install.sh" % STALE_TAG
-STALE_URL = RAW_PREFIX + STALE_INSTALL_PATH
-# A URL from somewhere other than the default branch, used to prove a divergent
-# URL is rejected.
-DIVERGENT_URL = RAW_PREFIX + "v0.1.2/install.sh"
-OTHER_BRANCH_URL = RAW_PREFIX + "master/install.sh"
+# A second, different release tag, used to prove a divergent URL is rejected.
+DIVERGENT_URL = "%sv0.1.2/install.sh" % RAW_PREFIX
+# A URL without any release selector, used to prove a mutable location is
+# rejected: it names neither the current release nor any other one.
+DEFAULT_BRANCH_URL = RAW_PREFIX + "main/install.sh"
 
 # The command the README must lead with, character for character.
 INSTALL_COMMAND = "curl -fsSL %s | sh" % INSTALL_URL
-# Updating runs the same script from the same URL.
+# Updating runs the same script from the same tag.
 UPDATE_COMMAND = INSTALL_COMMAND
 UNINSTALL_COMMAND = "curl -fsSL %s | sh -s -- --uninstall" % INSTALL_URL
 
@@ -48,6 +48,8 @@ FORBIDDEN_TOKENS = ("pipx", "python -m venv", "python3 -m venv")
 EDITABLE_RE = re.compile(r"(^|\s)-e(\s|$)|--editable\b")
 # A documented install-script URL, inside a command or in prose.
 URL_RE = re.compile(r"https?://[^\s|'\")]*?/install\.sh")
+# The release selector inside such a URL.
+TAG_PATH_RE = re.compile(r"(?<=/)(v[0-9][^/\s]*)(?=/install\.sh)")
 
 
 def _read_lines():
@@ -196,34 +198,28 @@ def assert_installer_command_is_first(lines):
 
 
 def assert_single_install_script_url(lines):
-    """One install-script URL, versionless, shared by every documented command.
-
-    The URL must be the canonical default-branch script, so the README neither
-    freezes the installation at an obsolete release nor names a tag the project
-    has not published. Every install-script URL in the document must be that
-    same string, and at least the install and the uninstall command must carry
-    it.
-    """
+    """One install-script URL, from the current release, shared by every command."""
     text = "\n".join(lines)
     if STALE_INSTALL_PATH in text:
         raise AssertionError(
             "README.md still names the stale install script %r" % STALE_INSTALL_PATH
-        )
-    pinned = TAG_PATH_RE.findall(text)
-    if pinned:
-        raise AssertionError(
-            "README.md pins an install-script URL to a release tag: %r" % (pinned,)
         )
     urls = URL_RE.findall(text)
     if len(urls) < 2:
         raise AssertionError(
             "README.md documents fewer than two install-script URLs: %r" % (urls,)
         )
+    for url in urls:
+        tags = TAG_PATH_RE.findall(url)
+        if tags != [INSTALL_TAG]:
+            raise AssertionError(
+                "the install-script URL %r does not name exactly the current "
+                "release %r" % (url, INSTALL_TAG)
+            )
     unique = sorted(set(urls))
     if unique != [INSTALL_URL]:
         raise AssertionError(
-            "README.md does not document exactly the canonical install-script "
-            "URL %r: %r" % (INSTALL_URL, unique)
+            "README.md names more than one install-script URL: %r" % (unique,)
         )
     return urls
 
@@ -428,8 +424,9 @@ class ReadmeInstallTest(unittest.TestCase):
     def test_no_stale_install_script_url(self) -> None:
         self.assertNotIn(STALE_INSTALL_PATH, "\n".join(self.lines))
 
-    def test_no_tag_pinned_install_script_url(self) -> None:
-        self.assertEqual(TAG_PATH_RE.findall("\n".join(self.lines)), [])
+    def test_install_script_url_names_the_current_release(self) -> None:
+        for url in URL_RE.findall("\n".join(self.lines)):
+            self.assertEqual(TAG_PATH_RE.findall(url), [INSTALL_TAG], url)
 
     def test_install_and_uninstall_share_the_install_script_url(self) -> None:
         urls = assert_single_install_script_url(self.lines)
@@ -588,24 +585,21 @@ class ChecksFailAsDesignedTest(unittest.TestCase):
         self.assert_rejected(assert_single_update_and_uninstall, lines)
 
     def test_stale_install_script_url_is_rejected(self) -> None:
-        """A document pinning the installer to the previous release is refused."""
+        """A document carrying the previous release's install script is refused."""
         lines = [line.replace(INSTALL_URL, STALE_URL) for line in FIXTURE]
         self.assert_rejected(assert_single_install_script_url, lines)
 
     def test_divergent_install_script_url_is_rejected(self) -> None:
-        """A second install-script URL besides the canonical one is refused."""
+        """A second install-script URL from another tag is refused."""
         lines = [
             line.replace(INSTALL_URL, DIVERGENT_URL) if "--uninstall" in line else line
             for line in FIXTURE
         ]
         self.assert_rejected(assert_single_install_script_url, lines)
 
-    def test_another_branch_install_script_url_is_rejected(self) -> None:
-        """A versionless URL from another branch is not the canonical one."""
-        lines = [
-            line.replace(INSTALL_URL, OTHER_BRANCH_URL) if "--uninstall" in line else line
-            for line in FIXTURE
-        ]
+    def test_default_branch_install_script_url_is_rejected(self) -> None:
+        """A URL that names no release at all is refused."""
+        lines = [line.replace(INSTALL_URL, DEFAULT_BRANCH_URL) for line in FIXTURE]
         self.assert_rejected(assert_single_install_script_url, lines)
 
     def test_a_missing_install_script_url_is_rejected(self) -> None:

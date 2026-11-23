@@ -15,7 +15,7 @@ Forgel Code installs with one command. It needs Python 3.9 or newer with the
 `pip` module it ships, and the `forgel` engine on `PATH`.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh
 ```
 
 The installer puts the client into `~/.local/share/forgel-code` and a
@@ -88,13 +88,13 @@ the installed version.
 ### Update
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh
 ```
 
 ### Uninstall
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/main/install.sh | sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh -s -- --uninstall
 ```
 
 The uninstall removes the installation prefix, the `forgel-code` launcher and

@@ -958,7 +958,7 @@ class NoEngineImportTest(unittest.TestCase):
 
 
 class ReadmeTest(unittest.TestCase):
-    INSTALL_URL = "https://raw.githubusercontent.com/forgel-dev/code/main/install.sh"
+    INSTALL_URL = "https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh"
 
     def setUp(self) -> None:
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -990,15 +990,13 @@ class ReadmeTest(unittest.TestCase):
             "curl -fsSL %s | sh" % self.INSTALL_URL,
             self.readme,
         )
-        self.assertNotRegex(self.readme, r"/v[0-9][^\s/]*/install\.sh")
+        self.assertIn(self.INSTALL_URL, self.readme)
 
-    def test_readme_has_no_tag_pinned_install(self) -> None:
-        self.assertNotRegex(self.readme, r"/v[0-9][^\s/]*/install\.sh")
+    def test_readme_has_no_default_branch_install(self) -> None:
         for line in self.readme.splitlines():
             stripped = line.strip()
             if "raw.githubusercontent.com/forgel-dev/code" in stripped:
-                self.assertNotRegex(stripped, r"/v[0-9][^\s/]*/install\.sh")
-                self.assertIn(self.INSTALL_URL, stripped)
+                self.assertIn("/v", stripped, line)
 
     def test_readme_has_no_editable_install_recommendation(self) -> None:
         self.assertNotIn("pip install .", self.readme)
