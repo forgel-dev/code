@@ -5,6 +5,10 @@ the engine's own commands, shows what the engine answered, and re-reads the
 task and release state from the engine after every request and before every
 prompt, so progress shows up without the owner asking for a status. It never
 calls a model, never reads a project and never runs a check.
+
+The session speaks the owner's language: its own wording exists in English,
+Russian, French and Spanish, and the owner's sentence reaches the engine
+unaltered so a model-composed answer arrives in that same language.
 """
 
 from __future__ import annotations
@@ -616,19 +620,334 @@ _TRAILING = frozenset(",;:!?.)]}>»\"'`")
 # Characters that mark a bare word as key material rather than as prose.
 VALUE_MARKS = "!@#$%^&*+=~/\\?"
 
+# Letters only one of the two Latin languages of the session writes.
+FRENCH_LETTERS = frozenset("àâçèêëîïôùûœ")
+SPANISH_LETTERS = frozenset("áíñóú¿¡")
+
+# Words characteristic of French and of Spanish. A word belonging to both
+# languages, or to English, is left out, so one listed word is a signal.
+FRENCH_WORDS = frozenset(
+    [
+        "affiche",
+        "afficher",
+        "affichez",
+        "aide",
+        "ainsi",
+        "alors",
+        "arrête",
+        "arrêter",
+        "arrêtez",
+        "au",
+        "aussi",
+        "autre",
+        "autres",
+        "aux",
+        "avec",
+        "beaucoup",
+        "bien",
+        "bientôt",
+        "bonjour",
+        "car",
+        "ce",
+        "ces",
+        "cet",
+        "cette",
+        "changer",
+        "changez",
+        "combien",
+        "comment",
+        "continuer",
+        "continuez",
+        "dans",
+        "demain",
+        "demande",
+        "demander",
+        "depuis",
+        "des",
+        "donc",
+        "du",
+        "elle",
+        "elles",
+        "encore",
+        "ensemble",
+        "est",
+        "et",
+        "état",
+        "être",
+        "fait",
+        "faire",
+        "faut",
+        "fois",
+        "il",
+        "ils",
+        "je",
+        "lancer",
+        "lancez",
+        "le",
+        "les",
+        "lequel",
+        "leur",
+        "leurs",
+        "lui",
+        "ma",
+        "maintenant",
+        "mais",
+        "merci",
+        "mes",
+        "mettre",
+        "mon",
+        "montre",
+        "montrer",
+        "montrez",
+        "mot",
+        "ne",
+        "ni",
+        "nos",
+        "notre",
+        "nous",
+        "nouveau",
+        "nouvelle",
+        "où",
+        "oui",
+        "par",
+        "parce",
+        "pas",
+        "pendant",
+        "personne",
+        "peu",
+        "peut",
+        "peux",
+        "plus",
+        "plusieurs",
+        "pour",
+        "pourquoi",
+        "projet",
+        "projets",
+        "quand",
+        "quel",
+        "quelle",
+        "quelles",
+        "quels",
+        "qui",
+        "quoi",
+        "refuse",
+        "refuser",
+        "refusez",
+        "reprendre",
+        "reprise",
+        "retravailler",
+        "revoir",
+        "réessayer",
+        "réessayez",
+        "rien",
+        "sans",
+        "savoir",
+        "se",
+        "selon",
+        "ses",
+        "sont",
+        "sous",
+        "souvent",
+        "sur",
+        "ta",
+        "tant",
+        "te",
+        "tel",
+        "telle",
+        "terminer",
+        "tes",
+        "toi",
+        "ton",
+        "toujours",
+        "tous",
+        "tout",
+        "toute",
+        "toutes",
+        "très",
+        "trop",
+        "tâche",
+        "tâches",
+        "un",
+        "une",
+        "vais",
+        "veux",
+        "veut",
+        "voici",
+        "voir",
+        "vois",
+        "vos",
+        "votre",
+        "voudrais",
+        "vous",
+    ]
+)
+
+SPANISH_WORDS = frozenset(
+    [
+        "ahora",
+        "allí",
+        "aquí",
+        "así",
+        "ayuda",
+        "ayer",
+        "buenas",
+        "buenos",
+        "cambiar",
+        "cambie",
+        "compruebe",
+        "con",
+        "cuando",
+        "cuánto",
+        "cuál",
+        "del",
+        "después",
+        "días",
+        "dónde",
+        "ejecute",
+        "el",
+        "entonces",
+        "esa",
+        "esas",
+        "ese",
+        "eso",
+        "esos",
+        "esta",
+        "estas",
+        "este",
+        "estos",
+        "está",
+        "están",
+        "favor",
+        "gracias",
+        "hasta",
+        "hay",
+        "haz",
+        "hecho",
+        "hola",
+        "hoy",
+        "lance",
+        "lanzar",
+        "luego",
+        "mañana",
+        "menos",
+        "mostrar",
+        "muestre",
+        "mucho",
+        "muy",
+        "más",
+        "nada",
+        "ninguna",
+        "ninguno",
+        "noche",
+        "nosotras",
+        "nosotros",
+        "nunca",
+        "para",
+        "pero",
+        "petición",
+        "por",
+        "porque",
+        "proyecto",
+        "proyectos",
+        "puede",
+        "puedes",
+        "puedo",
+        "qué",
+        "quién",
+        "rechace",
+        "rechazar",
+        "reintentar",
+        "reintente",
+        "salir",
+        "sesión",
+        "siempre",
+        "siguiente",
+        "solicitud",
+        "sí",
+        "también",
+        "tardes",
+        "tarea",
+        "tareas",
+        "tengo",
+        "tiene",
+        "tienes",
+        "todo",
+        "todos",
+        "trabajo",
+        "usted",
+        "ustedes",
+        "ver",
+        "versión",
+        "vez",
+        "ya",
+        "yo",
+    ]
+)
+
+# The elided words of French: ``l'état``, ``qu'il``, ``c'est``. English
+# contractions elide a whole word that is never one of these.
+FRENCH_ELISIONS = frozenset(
+    ["c", "d", "j", "jusqu", "l", "lorsqu", "m", "n", "puisqu", "qu", "s", "t"]
+)
+APOSTROPHES = "'’"
+
+# The session's own wording, in every language it speaks. The set of sentences
+# is the same in all four: a key is never missing from one of them.
 MESSAGES = {
-    "project": {"en": "project: %s", "ru": "проект: %s"},
+    "project": {
+        "en": "project: %s",
+        "ru": "проект: %s",
+        "fr": "projet : %s",
+        "es": "proyecto: %s",
+    },
     "project_none": {
         "en": "project: none selected (the engine uses its own active project)",
         "ru": "проект: не выбран (движок использует свой активный проект)",
+        "fr": "projet : aucun sélectionné (le moteur utilise son propre projet actif)",
+        "es": "proyecto: ninguno seleccionado (el motor usa su propio proyecto activo)",
     },
-    "tasks": {"en": "tasks:", "ru": "задачи:"},
-    "tasks_empty": {"en": "(no tasks)", "ru": "(задач нет)"},
-    "release": {"en": "release: %s", "ru": "релиз: %s"},
-    "release_unknown": {"en": "unknown", "ru": "неизвестно"},
-    "plan": {"en": "plan:", "ru": "план:"},
-    "plan_item": {"en": "  %d. %s", "ru": "  %d. %s"},
-    "left": {"en": "session ended", "ru": "сеанс завершён"},
+    "tasks": {
+        "en": "tasks:",
+        "ru": "задачи:",
+        "fr": "tâches :",
+        "es": "tareas:",
+    },
+    "tasks_empty": {
+        "en": "(no tasks)",
+        "ru": "(задач нет)",
+        "fr": "(aucune tâche)",
+        "es": "(no hay tareas)",
+    },
+    "release": {
+        "en": "release: %s",
+        "ru": "релиз: %s",
+        "fr": "publication : %s",
+        "es": "publicación: %s",
+    },
+    "release_unknown": {
+        "en": "unknown",
+        "ru": "неизвестно",
+        "fr": "inconnue",
+        "es": "desconocida",
+    },
+    "plan": {
+        "en": "plan:",
+        "ru": "план:",
+        "fr": "plan :",
+        "es": "plan:",
+    },
+    "plan_item": {
+        "en": "  %d. %s",
+        "ru": "  %d. %s",
+        "fr": "  %d. %s",
+        "es": "  %d. %s",
+    },
+    "left": {
+        "en": "session ended",
+        "ru": "сеанс завершён",
+        "fr": "session terminée",
+        "es": "sesión terminada",
+    },
     "clarify_several": {
         "en": (
             "that matches more than one action, so nothing was done. Name one "
@@ -640,6 +959,16 @@ MESSAGES = {
             "Назовите одно действие, например принять, вернуть на доработку, "
             "повторить, пауза, продолжить или переключить проект."
         ),
+        "fr": (
+            "cette demande correspond à plusieurs actions, donc rien n'a été "
+            "fait. Nommez une seule action, par exemple accepter, renvoyer pour "
+            "reprise, réessayer, mettre en pause, reprendre ou changer de projet."
+        ),
+        "es": (
+            "esa petición coincide con varias acciones, así que no se hizo nada. "
+            "Nombre una sola acción, por ejemplo aceptar, devolver para retrabajo, "
+            "reintentar, pausar, continuar o cambiar de proyecto."
+        ),
     },
     "clarify_task": {
         "en": (
@@ -649,6 +978,14 @@ MESSAGES = {
         "ru": (
             "запрос просит действие с задачей, но задача не названа. Напишите "
             "идентификатор задачи вместе с действием."
+        ),
+        "fr": (
+            "cette demande vise une action sur une tâche, mais ne nomme aucune "
+            "tâche. Écrivez l'identifiant de la tâche avec l'action."
+        ),
+        "es": (
+            "esa petición pide una acción sobre una tarea, pero no nombra ninguna "
+            "tarea. Escriba el identificador de la tarea junto con la acción."
         ),
     },
     "clarify_action": {
@@ -663,6 +1000,18 @@ MESSAGES = {
             "например принять, вернуть на доработку, повторить, пауза или "
             "продолжить."
         ),
+        "fr": (
+            "cette demande nomme une tâche mais aucune action que la session peut "
+            "exécuter, donc rien n'a été fait. Nommez une seule action, par "
+            "exemple accepter, renvoyer pour reprise, réessayer, mettre en pause "
+            "ou reprendre."
+        ),
+        "es": (
+            "esa petición nombra una tarea pero ninguna acción que la sesión pueda "
+            "ejecutar, así que no se hizo nada. Nombre una sola acción, por "
+            "ejemplo aceptar, devolver para retrabajo, reintentar, pausar o "
+            "continuar."
+        ),
     },
     "clarify_remarks": {
         "en": (
@@ -673,10 +1022,20 @@ MESSAGES = {
             "запрос возвращает задачу, но замечаний нет. Напишите, что нужно "
             "изменить, после идентификатора задачи."
         ),
+        "fr": (
+            "cette demande renvoie une tâche mais ne porte aucune remarque. "
+            "Écrivez ce qui doit changer après l'identifiant de la tâche."
+        ),
+        "es": (
+            "esa petición devuelve una tarea pero no lleva ninguna observación. "
+            "Escriba lo que debe cambiar después del identificador de la tarea."
+        ),
     },
     "clarify_project": {
         "en": "that selects a project but names none. Write the project key.",
         "ru": "запрос переключает проект, но проект не назван. Напишите ключ проекта.",
+        "fr": "cette demande change de projet mais n'en nomme aucun. Écrivez la clé du projet.",
+        "es": "esa petición selecciona un proyecto pero no nombra ninguno. Escriba la clave del proyecto.",
     },
     "sensitive": {
         "en": (
@@ -691,8 +1050,31 @@ MESSAGES = {
             "выполняются по фразе. Выполните для этого собственную команду "
             "клиента вне сеанса."
         ),
+        "fr": (
+            "adopter un dépôt, créer un projet, définir un secret et changer la "
+            "configuration sont des actions explicites et séparées et ne sont "
+            "jamais exécutées à partir d'une phrase. Lancez la commande propre "
+            "au client hors de la session."
+        ),
+        "es": (
+            "adoptar un repositorio, crear un proyecto, definir un secreto y "
+            "cambiar la configuración son acciones explícitas y separadas y "
+            "nunca se ejecutan a partir de una frase. Ejecute el comando propio "
+            "del cliente fuera de la sesión."
+        ),
     },
-    "failure": {"en": "failed: %s", "ru": "не удалось: %s"},
+    "failure": {
+        "en": "failed: the engine did not complete the request.",
+        "ru": "не удалось: движок не выполнил запрос.",
+        "fr": "échec : le moteur n'a pas terminé la demande.",
+        "es": "fallo: el motor no completó la solicitud.",
+    },
+    "engine_quote": {
+        "en": 'the engine said: "%s"',
+        "ru": "движок ответил: «%s»",
+        "fr": "le moteur a répondu : « %s »",
+        "es": "el motor respondió: «%s»",
+    },
     "next_step": {
         "en": (
             "next step: the session is still open. Check the engine with "
@@ -702,17 +1084,81 @@ MESSAGES = {
             "дальше: сеанс продолжается. Проверьте движок командой "
             "`forgel-code status` и повторите запрос."
         ),
+        "fr": (
+            "étape suivante : la session reste ouverte. Vérifiez le moteur avec "
+            "`forgel-code status` et renvoyez la demande."
+        ),
+        "es": (
+            "siguiente paso: la sesión sigue abierta. Compruebe el motor con "
+            "`forgel-code status` y envíe la solicitud de nuevo."
+        ),
     },
-    "no_reply": {"en": "(the engine sent no reply)", "ru": "(движок не прислал ответа)"},
+    "no_reply": {
+        "en": "(the engine sent no reply)",
+        "ru": "(движок не прислал ответа)",
+        "fr": "(le moteur n'a pas envoyé de réponse)",
+        "es": "(el motor no envió ninguna respuesta)",
+    },
 }
 
 
-def language_of(text: str) -> str:
-    """The language of the owner's message, as far as a reply must follow it."""
+def _alpha_runs(text: str) -> List[str]:
+    """The runs of letters in ``text``, in order."""
+    runs: List[str] = []
+    current: List[str] = []
     for character in text:
-        if "\u0400" <= character <= "\u04ff":
-            return "ru"
-    return "en"
+        if character.isalpha():
+            current.append(character)
+        elif current:
+            runs.append("".join(current))
+            current = []
+    if current:
+        runs.append("".join(current))
+    return runs
+
+
+def _elides(lowered: str) -> bool:
+    """Whether the text carries an elision characteristic of French."""
+    for index, character in enumerate(lowered):
+        if character not in APOSTROPHES:
+            continue
+        if index + 1 >= len(lowered) or not lowered[index + 1].isalpha():
+            continue
+        start = index
+        while start > 0 and lowered[start - 1].isalpha():
+            start -= 1
+        if lowered[start:index] in FRENCH_ELISIONS:
+            return True
+    return False
+
+
+def language_of(text: str, current: str = "en") -> str:
+    """The language of the owner's message, as far as a reply must follow it.
+
+    Russian is the language of Cyrillic text, French and Spanish are recognised
+    by the letters, words and elisions only they use, and other Latin text is
+    English. A message that carries no language signal at all keeps the
+    language the session is already using.
+    """
+    if any("\u0400" <= character <= "\u04ff" for character in text):
+        return "ru"
+    lowered = text.lower()
+    french = sum(1 for character in lowered if character in FRENCH_LETTERS)
+    spanish = sum(1 for character in lowered if character in SPANISH_LETTERS)
+    for run in _alpha_runs(lowered):
+        if run in FRENCH_WORDS:
+            french += 1
+        elif run in SPANISH_WORDS:
+            spanish += 1
+    if _elides(lowered):
+        french += 1
+    if french > spanish:
+        return "fr"
+    if spanish > french:
+        return "es"
+    if any(len(run) > 1 for run in _alpha_runs(text)):
+        return "en"
+    return current
 
 
 def _word_end(text: str, start: int) -> int:
@@ -1204,7 +1650,9 @@ class InteractiveSession:
         return _message("project_none", self.lang)
 
     def show_failure(self, exc: EngineError) -> None:
-        self.write(_message("failure", self.lang) % exc.message)
+        """State the failure in the owner's language, quoting the engine."""
+        self.write(_message("failure", self.lang))
+        self.write(_message("engine_quote", self.lang) % exc.message)
         self.write(_message("next_step", self.lang))
 
     # -- engine ---------------------------------------------------------
@@ -1315,7 +1763,8 @@ class InteractiveSession:
 
     def handle(self, text: str) -> str:
         """Carry out one sentence; ``leave`` ends the session."""
-        self.lang = language_of(text)
+        # The reply follows the owner's language before any of it is composed.
+        self.lang = language_of(text, self.lang)
         intent = resolve(text)
         kind = intent["kind"]
 
