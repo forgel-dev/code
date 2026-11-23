@@ -6,7 +6,7 @@
 - Release train: `20261122025705947173_fix-install-sh-so-a-new-terminal-finds-forgel-co`
 - Preset: python
 - Version files: `forgel_code/__init__.py`
-- GitHub release: pending
+- GitHub release: https://github.com/forgel-dev/code/releases/tag/v0.1.1
 
 ## Tasks
 
