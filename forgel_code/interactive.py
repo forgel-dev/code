@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence, TextIO
+from typing import Any, Dict, List, Optional, Sequence, TextIO, Tuple
 
 from . import commands
 from .engine import DEFAULT_TIMEOUT, Engine, EngineError
@@ -219,7 +219,9 @@ REMARK_LEADERS = tuple(
     )
 )
 
-# Anything that names key material never reaches the screen unredacted.
+# Words that name key material. A label is one word or a compound name whose
+# segments are joined by "_", "." or "-", and a compound label is
+# secret-bearing when one of its segments is one of these words.
 SECRET_WORDS = frozenset(
     [
         "token",
@@ -227,15 +229,289 @@ SECRET_WORDS = frozenset(
         "secret",
         "secrets",
         "password",
+        "passwords",
         "passwd",
-        "api_key",
-        "api-key",
+        "passphrase",
+        "passphrases",
         "apikey",
+        "apikeys",
         "authorization",
         "bearer",
+        "credential",
+        "credentials",
+        "key",
+        "keys",
     ]
 )
+
+# Russian inflects its labels, so a Russian label is recognised by its stem.
+SECRET_STEMS = ("парол", "секрет", "токен", "ключ")
+
+# An authorization scheme word stays visible; the credential after it does not.
+AUTH_SCHEMES = frozenset(
+    [
+        "apikey",
+        "aws4-hmac-sha256",
+        "basic",
+        "bearer",
+        "digest",
+        "hawk",
+        "hmac",
+        "jwt",
+        "negotiate",
+        "ntlm",
+        "oauth",
+        "oauth2",
+        "scram-sha-1",
+        "scram-sha-256",
+        "sso",
+    ]
+)
+
+# A word that carries a value to the word after it: ``the token is VALUE``.
+COPULAS = frozenset(
+    [
+        "am",
+        "are",
+        "be",
+        "been",
+        "being",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "had",
+        "has",
+        "have",
+        "is",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "should",
+        "was",
+        "were",
+        "will",
+        "would",
+        "был",
+        "была",
+        "были",
+        "было",
+        "будет",
+        "быть",
+        "есть",
+        "это",
+    ]
+)
+
+# Ordinary words never carry a secret: a label followed by one of them merely
+# mentions the label instead of binding a value to it.
+PROSE_WORDS = frozenset(
+    [
+        "a",
+        "about",
+        "above",
+        "after",
+        "again",
+        "against",
+        "all",
+        "also",
+        "an",
+        "and",
+        "another",
+        "any",
+        "as",
+        "at",
+        "because",
+        "before",
+        "below",
+        "between",
+        "both",
+        "but",
+        "by",
+        "down",
+        "during",
+        "each",
+        "either",
+        "else",
+        "every",
+        "few",
+        "for",
+        "from",
+        "further",
+        "here",
+        "how",
+        "however",
+        "if",
+        "in",
+        "into",
+        "it",
+        "its",
+        "just",
+        "less",
+        "many",
+        "me",
+        "more",
+        "most",
+        "much",
+        "my",
+        "neither",
+        "never",
+        "no",
+        "nor",
+        "not",
+        "of",
+        "off",
+        "on",
+        "once",
+        "only",
+        "or",
+        "other",
+        "our",
+        "out",
+        "over",
+        "own",
+        "per",
+        "please",
+        "same",
+        "she",
+        "so",
+        "some",
+        "still",
+        "such",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "though",
+        "through",
+        "to",
+        "too",
+        "under",
+        "until",
+        "up",
+        "us",
+        "very",
+        "via",
+        "we",
+        "what",
+        "when",
+        "where",
+        "whether",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "with",
+        "within",
+        "without",
+        "yet",
+        "you",
+        "your",
+        "а",
+        "без",
+        "бы",
+        "в",
+        "вам",
+        "вас",
+        "весь",
+        "во",
+        "вот",
+        "все",
+        "вы",
+        "где",
+        "да",
+        "даже",
+        "для",
+        "до",
+        "его",
+        "если",
+        "же",
+        "за",
+        "здесь",
+        "и",
+        "из",
+        "или",
+        "им",
+        "их",
+        "к",
+        "как",
+        "ко",
+        "когда",
+        "кто",
+        "ли",
+        "между",
+        "мы",
+        "на",
+        "над",
+        "не",
+        "него",
+        "нет",
+        "ни",
+        "но",
+        "о",
+        "об",
+        "однако",
+        "он",
+        "она",
+        "они",
+        "оно",
+        "от",
+        "перед",
+        "по",
+        "под",
+        "после",
+        "при",
+        "про",
+        "с",
+        "со",
+        "так",
+        "там",
+        "те",
+        "тем",
+        "то",
+        "тоже",
+        "только",
+        "тот",
+        "тут",
+        "у",
+        "уже",
+        "что",
+        "чтобы",
+        "эта",
+        "эти",
+        "этот",
+        "я",
+    ]
+)
+
+# The one marker a hidden value turns into.
 REDACTED = "[redacted]"
+
+# A label is one word, or a compound name whose segments are joined by "_",
+# "." or "-".
+_LABEL_JOINERS = "._-"
+_SPACES = " \t"
+_QUOTES = "\"'`"
+# A value never starts with punctuation that merely closes a clause.
+_NOT_A_VALUE = frozenset(",;:!?)]}>»[")
+# Punctuation after a value closes the clause; it is not part of the value.
+_TRAILING = frozenset(",;:!?.)]}>»\"'`")
+# A label in one of these positions starts a clause of its own.
+_BOUNDARY = frozenset("\n:;,([{|}=\"'`.!?")
+_BULLETS = frozenset(["-", "*", "\u2022"])
+# Characters that mark a bare word as key material rather than as prose.
+VALUE_MARKS = "!@#$%^&*+=~/\\?"
 
 MESSAGES = {
     "project": {"en": "project: %s", "ru": "проект: %s"},
@@ -336,31 +612,213 @@ def language_of(text: str) -> str:
     return "en"
 
 
-def _secret_word(word: str) -> bool:
-    return word.lower().strip(":;,.\"'") in SECRET_WORDS
+def _word_end(text: str, start: int) -> int:
+    """The end of the word characters that start at ``start``."""
+    end = start
+    while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+        end += 1
+    return end
+
+
+def _label_end(text: str, start: int) -> Optional[int]:
+    """The end of the label that starts at ``start``, if one does."""
+    end = _word_end(text, start)
+    if end == start:
+        return None
+    while end < len(text) and text[end] in _LABEL_JOINERS:
+        following = _word_end(text, end + 1)
+        if following == end + 1:
+            break
+        end = following
+    return end
+
+
+def _labels(text: str):
+    """Every label in ``text``, as ``(start, end)`` pairs."""
+    position = 0
+    while position < len(text):
+        end = _label_end(text, position)
+        if end is None:
+            position += 1
+            continue
+        yield position, end
+        position = end
+
+
+def _segments(label: str) -> List[str]:
+    """The segments of a label, as split by its joiners."""
+    parts: List[str] = []
+    current: List[str] = []
+    for character in label:
+        if character in _LABEL_JOINERS:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+    parts.append("".join(current))
+    return parts
+
+
+def _secret_label(label: str) -> bool:
+    """Whether a label word or compound name bears a secret."""
+    lowered = label.lower()
+    if lowered in SECRET_WORDS:
+        return True
+    for segment in _segments(lowered):
+        if segment in SECRET_WORDS or segment.startswith(SECRET_STEMS):
+            return True
+    return False
+
+
+def _skip_spaces(text: str, start: int) -> int:
+    while start < len(text) and text[start] in _SPACES:
+        start += 1
+    return start
+
+
+def _bare(token: str) -> str:
+    """A token without its quotes and closing punctuation, lower-cased."""
+    return token.strip(_QUOTES).rstrip(",;:!?)]}>»").lower()
+
+
+def _looks_like_credential(token: str) -> bool:
+    """Whether a bare word looks like key material rather than like prose."""
+    core = token.strip(_QUOTES).rstrip(",;:!?)]}>»")
+    if not core:
+        return False
+    if any(character.isdigit() for character in core):
+        return True
+    if core != core.lower() and core != core.upper():
+        return True
+    if len(core) >= 16:
+        return True
+    return any(character in VALUE_MARKS for character in core)
+
+
+def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
+    """The one value token at ``start``, a quoted run included."""
+    if start >= len(text) or text[start].isspace():
+        return None
+    if text.startswith(REDACTED, start):
+        return start, start + len(REDACTED)
+    if text[start] in _NOT_A_VALUE:
+        return None
+    if text[start] in _QUOTES:
+        limit = len(text)
+        newline = text.find("\n", start)
+        if newline >= 0:
+            limit = newline
+        closing = text.find(text[start], start + 1, limit)
+        if closing < 0:
+            return None
+        return start, closing + 1
+    end = start
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    while end > start + 1 and text[end - 1] in _TRAILING:
+        end -= 1
+    return start, end
+
+
+def _scheme_value(text: str, after: int) -> Optional[Tuple[int, int]]:
+    """The credential after an authorization scheme word, if there is one."""
+    span = _span(text, _skip_spaces(text, after))
+    if span is None:
+        return None
+    if _bare(text[span[0]:span[1]]) in PROSE_WORDS:
+        # ``bearer of good news`` names no credential.
+        return None
+    return span
+
+
+def _bound_value(text: str, start: int) -> Optional[Tuple[int, int]]:
+    """The value a joiner at ``start`` binds, past an authorization scheme."""
+    span = _span(text, _skip_spaces(text, start))
+    if span is None:
+        return None
+    if _bare(text[span[0]:span[1]]) in AUTH_SCHEMES:
+        # The scheme word may stay visible; the credential after it may not.
+        return _scheme_value(text, span[1])
+    return span
+
+
+def _stands_alone(text: str, start: int) -> bool:
+    """Whether a label starts a clause, the way ``token abc`` does."""
+    lead = text[:start].rstrip(_SPACES)
+    if not lead:
+        return True
+    if lead[-1] in _BOUNDARY:
+        return True
+    return lead.rsplit("\n", 1)[-1].strip() in _BULLETS
+
+
+def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]:
+    """The span of the value bound to the label that starts at ``start``."""
+    while True:
+        if label_end >= len(text):
+            return None
+        character = text[label_end]
+        if character in _QUOTES:
+            return _span(text, label_end)
+        if character in "=:":
+            return _bound_value(text, label_end + 1)
+        if character not in _SPACES:
+            return None
+        after = _skip_spaces(text, label_end)
+        if after >= len(text):
+            return None
+        if text[after] in "=:":
+            label_end = after
+            continue
+        if text[after] in _QUOTES:
+            return _span(text, after)
+        following = _label_end(text, after)
+        if following is None:
+            return None
+        word = _bare(text[after:following])
+        if word in AUTH_SCHEMES:
+            # ``token Bearer VALUE``: the scheme word stays, the value goes.
+            return _scheme_value(text, following)
+        if _secret_label(text[after:following]):
+            # A compound label may be written as several words.
+            label_end = following
+            continue
+        if word in COPULAS:
+            # ``the token is VALUE``: the copula stays, the value goes.
+            position = _skip_spaces(text, following)
+            if position < len(text) and text[position] in "=:":
+                return _bound_value(text, position + 1)
+            span = _bound_value(text, following)
+            if span is None:
+                return None
+            if not _looks_like_credential(text[span[0]:span[1]]):
+                return None
+            return span
+        if word in PROSE_WORDS:
+            # The label is mentioned, not bound to a value.
+            return None
+        if not _stands_alone(text, start) and not _looks_like_credential(word):
+            return None
+        return _bound_value(text, after)
 
 
 def redact(text: str) -> str:
     """Never let key material reach the screen."""
+    if not text:
+        return text
     out: List[str] = []
-    hide_next = False
-    for word in text.split(" "):
-        if hide_next and word:
-            head, separator, tail = word.partition("=")
-            if separator and tail:
-                out.append(head + separator + REDACTED)
-            else:
-                out.append(REDACTED)
-            hide_next = False
+    copied = 0
+    for start, end in _labels(text):
+        if start < copied or not _secret_label(text[start:end]):
             continue
-        head, separator, tail = word.partition("=")
-        if _secret_word(head):
-            if separator and tail:
-                out.append(head + separator + REDACTED)
-                continue
-            hide_next = True
-        out.append(word)
-    return " ".join(out)
+        span = _binding(text, start, end)
+        if span is None:
+            continue
+        out.append(text[copied:span[0]])
+        out.append(REDACTED)
+        copied = span[1]
+    out.append(text[copied:])
+    return "".join(out)
 
 
 def _normalise(text: str) -> str:
