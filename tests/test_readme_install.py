@@ -9,12 +9,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 
+# The release whose installer and uninstaller the documentation describes.
+INSTALL_TAG = "v0.1.1"
+# The tag the README named before the installer gained the login-shell handling
+# the documentation promises. It must not come back.
+STALE_TAG = "v0.1.0"
+
+RAW_PREFIX = "https://raw.githubusercontent.com/forgel-dev/code/"
+INSTALL_URL = "%s%s/install.sh" % (RAW_PREFIX, INSTALL_TAG)
+STALE_URL = "%s%s/install.sh" % (RAW_PREFIX, STALE_TAG)
+STALE_INSTALL_PATH = "/%s/install.sh" % STALE_TAG
+
 # The command the README must lead with, character for character.
-INSTALL_COMMAND = (
-    "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh"
-    " | sh"
-)
-INSTALL_TAG = "v0.1.0"
+INSTALL_COMMAND = "curl -fsSL %s | sh" % INSTALL_URL
+# Updating runs the same script from the same tag.
+UPDATE_COMMAND = INSTALL_COMMAND
+UNINSTALL_COMMAND = "curl -fsSL %s | sh -s -- --uninstall" % INSTALL_URL
 
 HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.*\S)\s*$")
 FENCE_RE = re.compile(r"^\s*```")
@@ -31,11 +41,10 @@ MAIN_PATH_TOKENS = (
 FORBIDDEN_TOKENS = ("pipx", "python -m venv", "python3 -m venv")
 # An editable install: the shorthand flag as a word of its own, or the long one.
 EDITABLE_RE = re.compile(r"(^|\s)-e(\s|$)|--editable\b")
-PIPELINE_RE = re.compile(
-    r"curl\b[^\n]*?"
-    r"raw\.githubusercontent\.com/forgel-dev/code/"
-    r"(?P<tag>v[0-9][^\s/]*)/install\.sh\b[^\n]*?\|\s*sh\b"
-)
+# A documented install-script URL, inside a command or in prose.
+URL_RE = re.compile(r"https?://[^\s|'\")]*?/install\.sh")
+# The tag selector inside such a URL.
+TAG_RE = re.compile(r"v[0-9][^\s/]*")
 
 
 def _read_lines():
@@ -133,6 +142,26 @@ def _section_commands(lines, title):
     ]
 
 
+def _script_commands(block):
+    """The commands of a block that run a documented install-script URL."""
+    return [command for command in _commands(block) if URL_RE.search(command)]
+
+
+def _documented_script_commands(lines, title):
+    return [
+        command
+        for command in _section_commands(lines, title)
+        if URL_RE.search(command)
+    ]
+
+
+def _install_script_lines(lines):
+    """Every line of the document that names an install-script URL."""
+    return [
+        line.strip() for line in lines if "install.sh" in line and URL_RE.search(line)
+    ]
+
+
 def assert_installer_command_is_first(lines):
     """The first installation command is the one-line installer, nothing before it."""
     section = _section_lines(lines, "install")
@@ -161,6 +190,33 @@ def assert_installer_command_is_first(lines):
                     "installer on line %d: %s" % (token, position + 1, line)
                 )
     return INSTALL_COMMAND
+
+
+def assert_single_install_script_url(lines):
+    """One install-script URL, from the current release, shared by every command."""
+    text = "\n".join(lines)
+    if STALE_INSTALL_PATH in text:
+        raise AssertionError(
+            "README.md still names the stale install script %r" % STALE_INSTALL_PATH
+        )
+    urls = URL_RE.findall(text)
+    if len(urls) < 2:
+        raise AssertionError(
+            "README.md documents fewer than two install-script URLs: %r" % (urls,)
+        )
+    for url in urls:
+        tags = TAG_RE.findall(url)
+        if tags != [INSTALL_TAG]:
+            raise AssertionError(
+                "the install-script URL %r does not name exactly the current "
+                "release %r" % (url, INSTALL_TAG)
+            )
+    unique = sorted(set(urls))
+    if unique != [INSTALL_URL]:
+        raise AssertionError(
+            "README.md names more than one install-script URL: %r" % (unique,)
+        )
+    return urls
 
 
 def assert_no_alternative_main_path(lines):
@@ -259,36 +315,33 @@ def assert_prerequisites(lines):
 
 
 def assert_single_update_and_uninstall(lines):
-    """Exactly one update line and exactly one uninstall line, same command."""
-    installs = []
-    updates = []
-    uninstalls = []
-    for line in lines:
-        if "install.sh" not in line:
-            continue
-        if "--uninstall" in line:
-            uninstalls.append(line.strip())
-            continue
-        match = PIPELINE_RE.search(line)
-        if not match:
-            continue
-        if match.group("tag") == INSTALL_TAG:
-            installs.append(line.strip())
-        else:
-            updates.append(line.strip())
+    """Exactly one install, update and uninstall line, all from one script URL."""
+    blocks = _code_blocks(_section_lines(lines, "install"))
+    if not blocks:
+        raise AssertionError("the install section shows no command block")
+    installs = _script_commands(blocks[0][1])
+    updates = _documented_script_commands(lines, "update")
+    uninstalls = _documented_script_commands(lines, "uninstall")
     if installs != [INSTALL_COMMAND]:
         raise AssertionError(
             "expected exactly one installation command, found %r" % (installs,)
         )
-    if len(updates) != 1:
+    if updates != [UPDATE_COMMAND]:
         raise AssertionError(
             "expected exactly one update line, found %d: %r"
             % (len(updates), updates)
         )
-    if len(uninstalls) != 1:
+    if uninstalls != [UNINSTALL_COMMAND]:
         raise AssertionError(
             "expected exactly one uninstall line, found %d: %r"
             % (len(uninstalls), uninstalls)
+        )
+    documented = _install_script_lines(lines)
+    expected = [INSTALL_COMMAND, UPDATE_COMMAND, UNINSTALL_COMMAND]
+    if sorted(documented) != sorted(expected):
+        raise AssertionError(
+            "README.md names install-script commands besides the install, update "
+            "and uninstall lines: %r" % (documented,)
         )
     for command in (updates[0], uninstalls[0]):
         if "| sh" not in command:
@@ -363,6 +416,14 @@ class ReadmeInstallTest(unittest.TestCase):
     def test_one_windows_line_outside_the_main_path(self) -> None:
         assert_single_windows_line(self.lines)
 
+    def test_no_stale_install_script_url(self) -> None:
+        self.assertNotIn(STALE_INSTALL_PATH, "\n".join(self.lines))
+
+    def test_install_and_uninstall_share_the_install_script_url(self) -> None:
+        urls = assert_single_install_script_url(self.lines)
+        self.assertGreaterEqual(len(urls), 2)
+        self.assertEqual(set(urls), {INSTALL_URL})
+
 
 # A tiny README with the same shape, used to prove the guards fail as designed.
 FIXTURE = [
@@ -380,13 +441,13 @@ FIXTURE = [
     "### Update",
     "",
     "```sh",
-    "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh",
+    UPDATE_COMMAND,
     "```",
     "",
     "### Uninstall",
     "",
     "```sh",
-    "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh | sh -s -- --uninstall",
+    UNINSTALL_COMMAND,
     "```",
     "",
     "Windows is not the main installation method; use `python -m pip install --user`.",
@@ -429,6 +490,7 @@ class ChecksFailAsDesignedTest(unittest.TestCase):
         assert_prerequisites(FIXTURE)
         assert_single_update_and_uninstall(FIXTURE)
         assert_single_windows_line(FIXTURE)
+        assert_single_install_script_url(FIXTURE)
 
     def test_accepts_the_extra_install_inside_the_tests_section(self) -> None:
         lines = FIXTURE + TESTS_FIXTURE
@@ -507,10 +569,28 @@ class ChecksFailAsDesignedTest(unittest.TestCase):
             "```",
         ]
         self.assert_rejected(assert_single_update_and_uninstall, lines)
+        self.assert_rejected(assert_single_install_script_url, lines)
 
     def test_rejects_a_missing_uninstall_line(self) -> None:
         lines = [line for line in FIXTURE if "--uninstall" not in line]
         self.assert_rejected(assert_single_update_and_uninstall, lines)
+
+    def test_rejects_the_stale_install_script_url(self) -> None:
+        lines = [line.replace(INSTALL_URL, STALE_URL) for line in FIXTURE]
+        self.assert_rejected(assert_single_install_script_url, lines)
+        self.assert_rejected(assert_single_update_and_uninstall, lines)
+
+    def test_rejects_install_and_uninstall_on_different_tags(self) -> None:
+        lines = [
+            line.replace(INSTALL_URL, STALE_URL) if "--uninstall" in line else line
+            for line in FIXTURE
+        ]
+        self.assert_rejected(assert_single_install_script_url, lines)
+        self.assert_rejected(assert_single_update_and_uninstall, lines)
+
+    def test_rejects_a_stale_url_anywhere_in_the_document(self) -> None:
+        lines = FIXTURE + ["Older installs still run %s." % STALE_URL]
+        self.assert_rejected(assert_single_install_script_url, lines)
 
     def test_rejects_a_second_windows_line(self) -> None:
         self.assert_rejected(
