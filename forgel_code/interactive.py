@@ -305,9 +305,8 @@ COPULAS = frozenset(
     ]
 )
 
-# Ordinary words never carry a secret: a label followed by one of them merely
-# mentions the label instead of binding a value to it.
-PROSE_WORDS = frozenset(
+# Function words and pronouns: a label followed by one of them never binds it.
+FUNCTION_WORDS = frozenset(
     [
         "a",
         "about",
@@ -495,6 +494,110 @@ PROSE_WORDS = frozenset(
     ]
 )
 
+# Ordinary verbs and nouns that narrate work: a label followed by one of them
+# reports on the label instead of binding a value to it.
+NARRATIVE_WORDS = frozenset(
+    [
+        "active",
+        "added",
+        "available",
+        "broken",
+        "changed",
+        "checked",
+        "clean",
+        "complete",
+        "completed",
+        "configured",
+        "correct",
+        "created",
+        "current",
+        "disabled",
+        "done",
+        "empty",
+        "enabled",
+        "expired",
+        "failed",
+        "fine",
+        "found",
+        "fresh",
+        "generated",
+        "given",
+        "gone",
+        "hidden",
+        "invalid",
+        "later",
+        "loaded",
+        "lost",
+        "matching",
+        "missing",
+        "moved",
+        "needed",
+        "new",
+        "next",
+        "none",
+        "old",
+        "open",
+        "passed",
+        "pending",
+        "present",
+        "provided",
+        "ready",
+        "received",
+        "removed",
+        "renewed",
+        "reported",
+        "requested",
+        "required",
+        "reset",
+        "rotated",
+        "rotation",
+        "saved",
+        "scheduled",
+        "selected",
+        "sent",
+        "set",
+        "shown",
+        "stale",
+        "stored",
+        "success",
+        "unchanged",
+        "updated",
+        "uploaded",
+        "used",
+        "valid",
+        "verified",
+        "written",
+        "wrong",
+        "готов",
+        "готова",
+        "готово",
+        "готовы",
+        "запланирован",
+        "изменен",
+        "изменён",
+        "истек",
+        "истёк",
+        "найден",
+        "обновлен",
+        "обновлён",
+        "отправлен",
+        "позже",
+        "получен",
+        "потерян",
+        "проверен",
+        "сброшен",
+        "создан",
+        "сохранен",
+        "сохранён",
+        "удален",
+        "удалён",
+        "установлен",
+    ]
+)
+
+# Everyday prose: a label followed by one of these words is merely mentioned.
+PROSE_WORDS = FUNCTION_WORDS | NARRATIVE_WORDS
+
 # The one marker a hidden value turns into.
 REDACTED = "[redacted]"
 
@@ -502,14 +605,14 @@ REDACTED = "[redacted]"
 # "." or "-".
 _LABEL_JOINERS = "._-"
 _SPACES = " \t"
-_QUOTES = "\"'`"
+# Quote characters that open a value and the character that closes it.
+_QUOTE_PAIRS = {'"': '"', "'": "'", "`": "`", "«": "»"}
+# Quote characters that dress a value; stripping them compares the bare word.
+_QUOTES = "\"'`«»"
 # A value never starts with punctuation that merely closes a clause.
 _NOT_A_VALUE = frozenset(",;:!?)]}>»[")
 # Punctuation after a value closes the clause; it is not part of the value.
 _TRAILING = frozenset(",;:!?.)]}>»\"'`")
-# A label in one of these positions starts a clause of its own.
-_BOUNDARY = frozenset("\n:;,([{|}=\"'`.!?")
-_BULLETS = frozenset(["-", "*", "\u2022"])
 # Characters that mark a bare word as key material rather than as prose.
 VALUE_MARKS = "!@#$%^&*+=~/\\?"
 
@@ -681,8 +784,8 @@ def _bare(token: str) -> str:
     return token.strip(_QUOTES).rstrip(",;:!?)]}>»").lower()
 
 
-def _looks_like_credential(token: str) -> bool:
-    """Whether a bare word looks like key material rather than like prose."""
+def _carries_markers(token: str) -> bool:
+    """Whether a word carries a digit, mixed case or value punctuation."""
     core = token.strip(_QUOTES).rstrip(",;:!?)]}>»")
     if not core:
         return False
@@ -690,9 +793,12 @@ def _looks_like_credential(token: str) -> bool:
         return True
     if core != core.lower() and core != core.upper():
         return True
-    if len(core) >= 16:
-        return True
     return any(character in VALUE_MARKS for character in core)
+
+
+def _is_prose(token: str) -> bool:
+    """Whether a word merely narrates work instead of naming a value."""
+    return _bare(token) in PROSE_WORDS and not _carries_markers(token)
 
 
 def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
@@ -703,15 +809,17 @@ def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
         return start, start + len(REDACTED)
     if text[start] in _NOT_A_VALUE:
         return None
-    if text[start] in _QUOTES:
+    closing = _QUOTE_PAIRS.get(text[start])
+    if closing is not None:
         limit = len(text)
         newline = text.find("\n", start)
         if newline >= 0:
             limit = newline
-        closing = text.find(text[start], start + 1, limit)
-        if closing < 0:
-            return None
-        return start, closing + 1
+        found = text.find(closing, start + 1, limit)
+        if found < 0:
+            # An unclosed quote hides the rest of its line.
+            return start, limit
+        return start, found + 1
     end = start
     while end < len(text) and not text[end].isspace():
         end += 1
@@ -742,23 +850,13 @@ def _bound_value(text: str, start: int) -> Optional[Tuple[int, int]]:
     return span
 
 
-def _stands_alone(text: str, start: int) -> bool:
-    """Whether a label starts a clause, the way ``token abc`` does."""
-    lead = text[:start].rstrip(_SPACES)
-    if not lead:
-        return True
-    if lead[-1] in _BOUNDARY:
-        return True
-    return lead.rsplit("\n", 1)[-1].strip() in _BULLETS
-
-
 def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]:
     """The span of the value bound to the label that starts at ``start``."""
     while True:
         if label_end >= len(text):
             return None
         character = text[label_end]
-        if character in _QUOTES:
+        if character in _QUOTE_PAIRS:
             return _span(text, label_end)
         if character in "=:":
             return _bound_value(text, label_end + 1)
@@ -770,7 +868,8 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
         if text[after] in "=:":
             label_end = after
             continue
-        if text[after] in _QUOTES:
+        if text[after] in _QUOTE_PAIRS:
+            # ``password "hunter2 and more"`` binds the quoted run.
             return _span(text, after)
         following = _label_end(text, after)
         if following is None:
@@ -784,20 +883,18 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
             label_end = following
             continue
         if word in COPULAS:
-            # ``the token is VALUE``: the copula stays, the value goes.
+            # ``the token is VALUE``: the copula stays, the word after decides.
             position = _skip_spaces(text, following)
             if position < len(text) and text[position] in "=:":
                 return _bound_value(text, position + 1)
             span = _bound_value(text, following)
             if span is None:
                 return None
-            if not _looks_like_credential(text[span[0]:span[1]]):
+            if _is_prose(text[span[0]:span[1]]):
                 return None
             return span
-        if word in PROSE_WORDS:
+        if _is_prose(text[after:following]):
             # The label is mentioned, not bound to a value.
-            return None
-        if not _stands_alone(text, start) and not _looks_like_credential(word):
             return None
         return _bound_value(text, after)
 
@@ -856,7 +953,7 @@ def _strip_leaders(text: str) -> str:
     changed = True
     while changed:
         changed = False
-        text = text.strip().lstrip(":—-,").strip()
+        text = text.strip().lstrip(":—-,..."[:3]).strip()
         lowered = text.lower()
         for leader in REMARK_LEADERS:
             if lowered.startswith(leader):
