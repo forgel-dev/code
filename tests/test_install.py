@@ -932,6 +932,61 @@ def _recording_login_shell(directory: Path, probe: Path, real_shell: str) -> Pat
     return stub
 
 
+def _late_login_shell(directory: Path, launcher: Path) -> Path:
+    """A handled shell that answers past the bound but claims the launcher resolved.
+
+    Its login session sleeps past a one-second bound and then prints exactly the
+    report a successful check prints. It ignores the graceful stop, so its own
+    exit, and not a signal, is what ends it.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "bash"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "trap '' TERM\n"
+        "sleep 2\n"
+        "printf 'forgel-fresh-path=%s\\n' '/usr/bin:/bin'\n"
+        "printf 'forgel-fresh-resolved=%s\\n' " + _shell_quote(launcher) + "\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _late_login_shell_withholding_decision(directory: Path, launcher: Path) -> Path:
+    """A late shell that hides the watchdog's decision while it runs.
+
+    It removes the write permission of the private check directory, so the
+    watchdog cannot record whether the bound elapsed, and restores it when it
+    exits past the bound, still printing the report of a successful check. The
+    directory is found the way the permission probe finds it: under the TMPDIR
+    the installer was given, next to the checked shell's own ``$HOME``.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "bash"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "trap '' TERM\n"
+        "check_dir=\n"
+        'for candidate in "$(dirname "$HOME")/tmp"/%s.*; do\n' % CHECK_PREFIX
+        + '    [ -d "$candidate" ] || continue\n'
+        + "    check_dir=$candidate\n"
+        + '    chmod 500 "$candidate" 2>/dev/null || true\n'
+        + "done\n"
+        + "sleep 2\n"
+        + "printf 'forgel-fresh-path=%s\\n' '/usr/bin:/bin'\n"
+        + "printf 'forgel-fresh-resolved=%s\\n' " + _shell_quote(launcher) + "\n"
+        + 'if [ -n "$check_dir" ]; then\n'
+        + '    chmod 700 "$check_dir" 2>/dev/null || true\n'
+        + "fi\n"
+        + "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
 class InstallerWatchdogTest(InstallerCase):
     """The post-write check is bounded, so a hanging shell cannot hang it."""
 
@@ -952,6 +1007,88 @@ class InstallerWatchdogTest(InstallerCase):
         self.assertIn("stopped after 1s", result.stderr)
         self.assertIn("did not put forgel-code on PATH", result.stderr)
         self.assertIn(str(profile), result.stderr)
+
+
+class InstallerBoundedTimeoutDecisionTest(InstallerCase):
+    """A check that outlives the bound fails, whatever its exit ordering."""
+
+    def isolation(self) -> dict:
+        """A one-second bound whose check files land in a directory we own."""
+        tmp = self.base / "tmp"
+        tmp.mkdir(exist_ok=True)
+        env = dict(self.env)
+        env["TMPDIR"] = str(tmp)
+        env.pop("FORGEL_CODE_PROFILE", None)
+        env["FORGEL_CODE_TIMEOUT"] = "1"
+        return env
+
+    def check_entries(self, tmp: Path):
+        """Every temporary entry the bounded check left under ``tmp``."""
+        return sorted(
+            path.name
+            for path in tmp.iterdir()
+            if path.name.startswith(CHECK_PREFIX)
+        )
+
+    def test_shell_that_outlives_the_limit_never_reports_success(self) -> None:
+        """A late shell that prints a success report fails at the bound."""
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        stub = _late_login_shell(self.base / "stubs", self.launcher)
+        env["SHELL"] = str(stub)
+
+        started = time.monotonic()
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        elapsed = time.monotonic() - started
+
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            "install.sh reported success for a check that outlived the bound:\n%s\n%s"
+            % (result.stdout, result.stderr),
+        )
+        self.assertLess(elapsed, 30, "the check did not honour its time bound")
+        self.assertIn("stopped after 1s", result.stderr)
+        self.assertIn("did not put forgel-code on PATH", result.stderr)
+        self.assertNotIn("PATH block written", result.stdout)
+        self.assertNotIn("Fresh login shell check", result.stdout)
+        self.assertEqual(
+            self.check_entries(tmp),
+            [],
+            "the timed-out check left temporary files behind",
+        )
+
+    def test_a_decision_that_never_arrives_is_not_a_success(self) -> None:
+        """The absence of ``timed-out`` is not proof that the bound did not elapse."""
+        env = self.isolation()
+        tmp = Path(env["TMPDIR"])
+        stub = _late_login_shell_withholding_decision(
+            self.base / "stubs", self.launcher
+        )
+        env["SHELL"] = str(stub)
+
+        started = time.monotonic()
+        result = _run(["sh", str(INSTALL_SH)], self.base, env)
+        elapsed = time.monotonic() - started
+
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            "install.sh reported success while the watchdog had recorded no decision:\n%s\n%s"
+            % (result.stdout, result.stderr),
+        )
+        self.assertLess(
+            elapsed, 30, "the wait for the watchdog's decision was not bounded"
+        )
+        self.assertIn("stopped after 1s", result.stderr)
+        self.assertIn("did not put forgel-code on PATH", result.stderr)
+        self.assertNotIn("PATH block written", result.stdout)
+        self.assertNotIn("Fresh login shell check", result.stdout)
+        self.assertEqual(
+            self.check_entries(tmp),
+            [],
+            "the check left its private directory behind",
+        )
 
 
 class InstallerBoundedCheckTest(InstallerCase):

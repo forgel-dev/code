@@ -13,9 +13,16 @@
 # shell; a shell outside the zsh and bash families gets the block in
 # $HOME/.profile and a warning that names the edited file. After writing the
 # block the installer starts that shell as a login interactive shell from a
-# cleared environment, under a hard time limit, and checks that
-# ``forgel-code`` resolves to the launcher it just wrote. Re-running replaces the
-# installation; running with ``--uninstall`` removes it again.
+# cleared environment, in a process group of its own, under a hard time limit.
+# A watchdog enforces that limit and is the only authority on whether it
+# elapsed: it records its decision in the private check directory, and the
+# installer reads the outcome only once that decision exists. A shell still
+# running when the limit elapses therefore fails the installation, whatever the
+# ordering of its exit and the decision. Nothing the check started outlives it:
+# the dedicated group, and the descendants that left it, are stopped on every
+# exit path. The installer then checks that ``forgel-code`` resolves to the
+# launcher it just wrote. Re-running replaces the installation; running with
+# ``--uninstall`` removes it again.
 #
 # Environment variables:
 #   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
@@ -65,6 +72,16 @@ CHECK_COMMAND='printf "forgel-fresh-path=%s\n" "$PATH"; fresh=$(command -v forge
 DEFAULT_VERIFY_LIMIT=10
 VERIFY_GRACE=2
 
+# How long the installer waits for the watchdog's decision, in whole seconds,
+# derived from the grace period. One polling step of the watchdog is the longest
+# the decision can take after the checked command exits, so one grace period
+# covers it with room to spare. A watchdog that never answers cannot hold the
+# installer longer than this.
+DECISION_WAIT=$VERIFY_GRACE
+if [ "$DECISION_WAIT" -lt 1 ]; then
+    DECISION_WAIT=1
+fi
+
 # The profile files this installer can have written. ``--uninstall`` cleans the
 # block out of every one of them, so no stale PATH entry stays behind. The list
 # is a superset of what the install path may edit, including ~/.bashrc, because
@@ -75,12 +92,18 @@ PROFILE_NAMES='.zshrc .zprofile .zshenv .bash_profile .bash_login .profile .bash
 # Set by ``verify_profile`` once the fresh shell resolved the launcher.
 VERIFIED_PATH=
 
-# What the bounded check owns while it runs: its private directory, the process
-# it started and the watchdog that bounds it. Every one of them is released by
-# ``cleanup_check``, whichever way the script ends.
+# What the bounded check owns while it runs: its private directory, the command
+# it started, the process group that command leads and the watchdog that bounds
+# it. Every one of them is released by ``cleanup_check``, whichever way the
+# script ends.
 CHECK_DIR=
 CHECK_CHILD=
+CHECK_GROUP=
 CHECK_WATCHER=
+
+# Set by ``cleanup_check`` once the current check has been released, so the exit
+# trap and a signal trap cannot release the same check twice.
+CHECK_CLEANED=
 
 # Set by ``bounded_run``: the exit status of the checked command and what it
 # printed. A status of 124 means the bound elapsed.
@@ -521,50 +544,104 @@ process_tree() {
         }'
 }
 
-# Signal a process and every process it started. When the process leads its own
-# process group the whole group is signalled, so a shell that forked cannot
-# leave anything behind; otherwise the process tree is walked. The checked
-# command is started in the installer's own process group on purpose, so this
-# never signals the installer itself.
-signal_run() {
+# Start the checked command in a process group of its own, and record that group
+# for the whole lifetime of the check: the command may exit at once while
+# something it started lives on in the same group. The launcher puts itself in a
+# new session, and so in a new process group, before it runs the command; the
+# group id is therefore its own pid. Python is already required to install the
+# client. A shell without it falls back to its own job control, and otherwise to
+# the descendant sweep alone.
+start_check() {
+    out=$1
+    shift
+    if [ -n "${PYTHON:-}" ] && "$PYTHON" -c 'import os' >/dev/null 2>&1; then
+        "$PYTHON" -c '
+import os, sys
+try:
+    os.setsid()
+except OSError:
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        pass
+try:
+    os.execvp(sys.argv[1], sys.argv[1:])
+except OSError:
+    os._exit(127)
+' "$@" > "$out" 2>/dev/null < /dev/null &
+    else
+        set -m 2>/dev/null || true
+        "$@" > "$out" 2>/dev/null < /dev/null &
+    fi
+    CHECK_CHILD=$!
+    set +m 2>/dev/null || true
+    CHECK_GROUP=$CHECK_CHILD
+    return 0
+}
+
+# Signal every member of a process group. The caller's own group is never
+# signalled, so a check that could not be placed in a group of its own cannot
+# make the cleanup reach the installer itself.
+signal_group() {
     signal=$1
-    root=$2
-    if [ -z "$root" ]; then
+    group=$2
+    case $group in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    own=
+    if command -v ps >/dev/null 2>&1; then
+        own=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ') || own=
+    fi
+    if [ -n "$own" ] && [ "$group" = "$own" ]; then
         return 0
     fi
-    targets=
-    if command -v ps >/dev/null 2>&1; then
-        group=$(ps -o pgid= -p "$root" 2>/dev/null | tr -d ' ') || group=
-        own=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ') || own=
-        case $group in
-            ''|*[!0-9]*) group= ;;
-        esac
-        if [ -n "$group" ] && [ "$group" != "$own" ]; then
-            targets=$(process_group "$group")
-        fi
+    if kill -"$signal" "-$group" 2>/dev/null; then
+        return 0
     fi
-    if [ -z "$targets" ]; then
-        targets=$(process_tree "$root")
-    fi
-    for pid in $targets; do
+    # A shell that cannot name a group signals its members one by one.
+    for pid in $(process_group "$group"); do
         kill -"$signal" "$pid" 2>/dev/null || true
     done
-    kill -"$signal" "$root" 2>/dev/null || true
+    return 0
+}
+
+# Stop what the checked command started. The dedicated process group is the
+# primary target: everything that stayed in it goes at once, on the success path
+# as well as on the timeout path. A sweep of the checked command's descendants
+# follows, so a descendant that left the group is reached as well.
+stop_check() {
+    signal=$1
+    signal_group "$signal" "$CHECK_GROUP"
+    if [ -n "$CHECK_CHILD" ]; then
+        for pid in $(process_tree "$CHECK_CHILD"); do
+            kill -"$signal" "$pid" 2>/dev/null || true
+        done
+        kill -"$signal" "$CHECK_CHILD" 2>/dev/null || true
+    fi
     return 0
 }
 
 # Release everything the bounded check owns: the watchdog, the checked process
-# and its children, and the private directory. It is idempotent, so it can run
-# from the exit trap and again from a signal trap.
+# group with the descendants that left it, and the private directory. It runs at
+# most once per check, so the exit trap and a signal trap cannot release the
+# same check twice and a second call is a no-op. Every piece of state the
+# release reads is cleared only after it has been used.
 cleanup_check() {
+    if [ -n "$CHECK_CLEANED" ]; then
+        return 0
+    fi
+    CHECK_CLEANED=1
     if [ -n "$CHECK_WATCHER" ]; then
         kill -TERM "$CHECK_WATCHER" 2>/dev/null || true
         wait "$CHECK_WATCHER" 2>/dev/null || true
         CHECK_WATCHER=
     fi
-    if [ -n "$CHECK_CHILD" ]; then
-        signal_run KILL "$CHECK_CHILD"
-        wait "$CHECK_CHILD" 2>/dev/null || true
+    if [ -n "$CHECK_GROUP" ] || [ -n "$CHECK_CHILD" ]; then
+        stop_check KILL
+        if [ -n "$CHECK_CHILD" ]; then
+            wait "$CHECK_CHILD" 2>/dev/null || true
+        fi
+        CHECK_GROUP=
         CHECK_CHILD=
     fi
     if [ -n "$CHECK_DIR" ]; then
@@ -579,29 +656,57 @@ check_interrupted() {
     exit "$1"
 }
 
+# Wait, for a bounded moment, until the watchdog has recorded its decision in
+# the private check directory: ``timed-out`` when the bound elapsed before the
+# checked command exited, ``finished`` when the command won that race. Status 0
+# means the decision is there, 1 that the watchdog did not answer within
+# DECISION_WAIT seconds. The wait never depends on the checked command, so a
+# watchdog that never answers delays the installer by that fixed limit at most.
+await_decision() {
+    decision_dir=$1
+    waited=0
+    while :; do
+        if [ -e "$decision_dir/timed-out" ] || [ -e "$decision_dir/finished" ]; then
+            return 0
+        fi
+        if [ "$waited" -ge "$DECISION_WAIT" ]; then
+            return 1
+        fi
+        sleep 1 2>/dev/null || true
+        waited=$((waited + 1))
+    done
+}
+
 # Run a command under a hard time bound. ``timeout`` from GNU coreutils is not
-# required and is not used: the command runs in the background, a watchdog
-# sends a graceful stop when the bound elapses and forcefully stops whatever
-# remains of the process tree after the grace period, and the caller returns
-# as soon as the command itself is done. Nothing the function starts survives
-# it. CHECK_STATUS is 124 when the bound elapsed.
+# required and is not used: the command runs in the background and a watchdog
+# bounds it. The watchdog is also the only authority on whether the bound
+# elapsed: it records ``timed-out`` in the private directory before it starts
+# the graceful stop, and ``finished`` when it sees the command gone before the
+# bound. The caller waits, for at most DECISION_WAIT seconds, until that
+# decision exists and only then reads the outcome, so the ordering between the
+# command's exit and the marker write cannot turn a timed-out check into a
+# success. After the graceful stop the watchdog forcefully stops the rest of the
+# checked command's process group once the grace period has passed. Nothing the
+# function starts survives it. CHECK_STATUS is 124 when the bound elapsed.
 #
-# The checked command is deliberately *not* given its own process group here.
-# ``set -m`` makes the shell put the background job in a background process
-# group, and an interactive login shell in that position stops on its first
-# terminal access instead of answering, which is exactly the hang this check
-# must not have. The process tree walk in ``signal_run`` reaches everything the
-# shell forked without it.
+# The checked command leads a process group of its own (see ``start_check``), so
+# the group is what the cleanup signals, on the success path as much as on the
+# timeout path. Its three standard descriptors are redirected, so the group has
+# no terminal to hold it and cannot stop on a terminal access.
 bounded_run() {
     limit=$1
     shift
     CHECK_STATUS=0
     CHECK_OUTPUT=
+    CHECK_CLEANED=
+    CHECK_CHILD=
+    CHECK_GROUP=
     if ! create_check_dir; then
         return 1
     fi
     out=$CHECK_DIR/output
     timed_out=$CHECK_DIR/timed-out
+    finished=$CHECK_DIR/finished
     saved_umask=$(umask)
     umask 077
     if ! : > "$out"; then
@@ -609,8 +714,7 @@ bounded_run() {
         cleanup_check
         return 1
     fi
-    "$@" > "$out" 2>/dev/null < /dev/null &
-    CHECK_CHILD=$!
+    start_check "$out" "$@"
     umask "$saved_umask"
     child=$CHECK_CHILD
     (
@@ -625,28 +729,38 @@ bounded_run() {
             sleeper=
             elapsed=$((elapsed + 1))
             if ! kill -0 "$child" 2>/dev/null; then
+                # The command finished inside the bound; record that decision
+                # so the caller never has to infer it from the exit alone.
+                : > "$finished" 2>/dev/null || true
                 exit 0
             fi
         done
         : > "$timed_out" 2>/dev/null || true
-        signal_run TERM "$child"
+        stop_check TERM
         sleep "$VERIFY_GRACE" 2>/dev/null || true
-        signal_run KILL "$child"
+        stop_check KILL
     ) &
     CHECK_WATCHER=$!
     wait "$child" || CHECK_STATUS=$?
-    CHECK_CHILD=
-    if [ -e "$timed_out" ]; then
-        # The watchdog still owns the graceful then the forceful stop; let it
-        # finish so nothing outlives the check.
+    if await_decision "$CHECK_DIR"; then
+        if [ -e "$timed_out" ]; then
+            CHECK_STATUS=124
+        fi
+        # The watchdog records its decision before it stops anything, so on
+        # the timeout path it may still own the graceful then the forceful
+        # stop; let it finish so nothing outlives the check.
+        wait "$CHECK_WATCHER" 2>/dev/null || true
+    else
+        # A watchdog that never answers is not allowed to hold the installer,
+        # and a decision that never arrives is never a successful check.
+        kill -KILL "$CHECK_WATCHER" 2>/dev/null || true
         wait "$CHECK_WATCHER" 2>/dev/null || true
         CHECK_STATUS=124
-    else
-        kill -TERM "$CHECK_WATCHER" 2>/dev/null || true
-        wait "$CHECK_WATCHER" 2>/dev/null || true
     fi
-    CHECK_WATCHER=
     CHECK_OUTPUT=$(cat "$out") || CHECK_OUTPUT=
+    # The check is released here, before any state the release reads is
+    # cleared: a successful check leaves nothing behind, exactly like a failed
+    # or a timed-out one.
     cleanup_check
     return 0
 }
