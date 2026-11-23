@@ -958,6 +958,8 @@ class NoEngineImportTest(unittest.TestCase):
 
 
 class ReadmeTest(unittest.TestCase):
+    INSTALL_URL = "https://raw.githubusercontent.com/forgel-dev/code/main/install.sh"
+
     def setUp(self) -> None:
         self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -985,16 +987,18 @@ class ReadmeTest(unittest.TestCase):
 
     def test_readme_has_a_pinned_install_command(self) -> None:
         self.assertIn(
-            "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/"
-            "install.sh | sh",
+            "curl -fsSL %s | sh" % self.INSTALL_URL,
             self.readme,
         )
+        self.assertNotRegex(self.readme, r"/v[0-9][^\s/]*/install\.sh")
 
-    def test_readme_has_no_default_branch_install(self) -> None:
+    def test_readme_has_no_tag_pinned_install(self) -> None:
+        self.assertNotRegex(self.readme, r"/v[0-9][^\s/]*/install\.sh")
         for line in self.readme.splitlines():
             stripped = line.strip()
             if "raw.githubusercontent.com/forgel-dev/code" in stripped:
-                self.assertIn("/v", stripped, line)
+                self.assertNotRegex(stripped, r"/v[0-9][^\s/]*/install\.sh")
+                self.assertIn(self.INSTALL_URL, stripped)
 
     def test_readme_has_no_editable_install_recommendation(self) -> None:
         self.assertNotIn("pip install .", self.readme)
@@ -1003,10 +1007,7 @@ class ReadmeTest(unittest.TestCase):
 
     def test_readme_documents_the_update_path(self) -> None:
         self.assertIn("### Update", self.readme)
-        self.assertIn(
-            "https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh",
-            self.readme,
-        )
+        self.assertIn(self.INSTALL_URL, self.readme)
 
 
 if __name__ == "__main__":
