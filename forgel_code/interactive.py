@@ -802,13 +802,15 @@ def _is_prose(token: str) -> bool:
 
 
 def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
-    """The one value token at ``start``, a quoted run included."""
+    """The characters of the one value at ``start``, a quoted run included.
+
+    The span is exactly what the marker replaces, so the quotation marks that
+    dress a value stay visible around it.
+    """
     if start >= len(text) or text[start].isspace():
         return None
     if text.startswith(REDACTED, start):
         return start, start + len(REDACTED)
-    if text[start] in _NOT_A_VALUE:
-        return None
     closing = _QUOTE_PAIRS.get(text[start])
     if closing is not None:
         limit = len(text)
@@ -817,15 +819,31 @@ def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
             limit = newline
         found = text.find(closing, start + 1, limit)
         if found < 0:
-            # An unclosed quote hides the rest of its line.
-            return start, limit
-        return start, found + 1
+            # An unclosed quote hides the rest of its line behind the quote.
+            return start + 1, limit
+        return start + 1, found
+    if text[start] in _NOT_A_VALUE:
+        return None
     end = start
     while end < len(text) and not text[end].isspace():
         end += 1
     while end > start + 1 and text[end - 1] in _TRAILING:
         end -= 1
     return start, end
+
+
+def _separator_end(text: str, start: int) -> int:
+    """The end of a run of ':' and '=' separators, spaces included.
+
+    Every separator character stays visible; only the value after the whole
+    run is masked.
+    """
+    position = start
+    while position < len(text) and (
+        text[position] in "=:" or text[position] in _SPACES
+    ):
+        position += 1
+    return position
 
 
 def _scheme_value(text: str, after: int) -> Optional[Tuple[int, int]]:
@@ -859,7 +877,7 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
         if character in _QUOTE_PAIRS:
             return _span(text, label_end)
         if character in "=:":
-            return _bound_value(text, label_end + 1)
+            return _bound_value(text, _separator_end(text, label_end))
         if character not in _SPACES:
             return None
         after = _skip_spaces(text, label_end)
@@ -886,7 +904,7 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
             # ``the token is VALUE``: the copula stays, the word after decides.
             position = _skip_spaces(text, following)
             if position < len(text) and text[position] in "=:":
-                return _bound_value(text, position + 1)
+                return _bound_value(text, _separator_end(text, position))
             span = _bound_value(text, following)
             if span is None:
                 return None

@@ -77,6 +77,7 @@ class RedactFormTest(unittest.TestCase):
         self.assertEqual(
             interactive.redact("password:hunter2"), "password:[redacted]"
         )
+        self.assertEqual(interactive.redact("token:abc123"), "token:[redacted]")
 
     def test_an_equals_joined_value_is_masked(self) -> None:
         self.assertEqual(
@@ -86,8 +87,33 @@ class RedactFormTest(unittest.TestCase):
             interactive.redact("password = hunter2"), "password = [redacted]"
         )
 
+    def test_every_separator_character_stays_visible(self) -> None:
+        for text, shown in (
+            ("password==hunter2", "password==[redacted]"),
+            ("token::abc", "token::[redacted]"),
+            ("password = = hunter2", "password = = [redacted]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_quoted_value_is_masked_between_its_quotes(self) -> None:
+        for text, shown in (
+            ('password: "hunter2 and more"', 'password: "[redacted]"'),
+            ("password: 'hunter2 and more'", "password: '[redacted]'"),
+            ("password: `hunter2 and more`", "password: `[redacted]`"),
+            ("password: «hunter2 and more»", "password: «[redacted]»"),
+            ('password "hunter2 and more"', 'password "[redacted]"'),
+            ('password: "hunter2 and more', 'password: "[redacted]'),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
     def test_a_whitespace_joined_value_still_is_masked(self) -> None:
         self.assertEqual(interactive.redact("token abc"), "token [redacted]")
+        self.assertEqual(interactive.redact("the token abc"), "the token [redacted]")
+        self.assertEqual(
+            interactive.redact("set password swordfish"), "set password [redacted]"
+        )
 
     def test_an_authorization_scheme_stays_visible(self) -> None:
         self.assertEqual(
@@ -103,6 +129,7 @@ class RedactFormTest(unittest.TestCase):
         self.assertEqual(interactive.redact("пароль: hunter2"), "пароль: [redacted]")
         self.assertEqual(interactive.redact("Пароль=hunter2"), "Пароль=[redacted]")
         self.assertEqual(interactive.redact("токен abc123"), "токен [redacted]")
+        self.assertEqual(interactive.redact("токен: abc123"), "токен: [redacted]")
 
     def test_a_compound_label_is_masked(self) -> None:
         for text, shown in (
@@ -116,6 +143,8 @@ class RedactFormTest(unittest.TestCase):
 
     def test_a_mentioned_label_is_left_alone(self) -> None:
         for text in (
+            "Password updated.",
+            "Secret rotation scheduled",
             "the token is missing",
             "rotate the password please",
             "send the secret later",
@@ -137,6 +166,7 @@ class RedactFormTest(unittest.TestCase):
         for text in (
             "password: hunter2",
             "password==hunter2",
+            'password: "hunter2 and more"',
             "token abc",
             "Authorization: Bearer abc123",
             "пароль: hunter2",
@@ -146,6 +176,15 @@ class RedactFormTest(unittest.TestCase):
                 once = interactive.redact(text)
                 self.assertEqual(interactive.redact(once), once)
                 self.assertIn("[redacted]", once)
+
+    def test_each_masked_value_carries_exactly_one_marker(self) -> None:
+        for text in (
+            "password: hunter2",
+            "password==hunter2",
+            'password: "hunter2 and more"',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text).count("[redacted]"), 1)
 
 
 class ScreenMaskingTest(unittest.TestCase):
