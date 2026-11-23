@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Remove the PATH block from the profile named by `FORGEL_CODE_PROFILE` — `--uninstall` again cleans the marked block out of the profile the override variable names, in addition to the six standard profile files, so a block left by a completed install or by an install that failed its fresh-shell check no longer survives.
+- Point the README install, update and uninstall commands at the current `v0.1.1` release installer — the documented commands no longer fetch the stale install script, all three name one and the same install-script URL, and the guard in `tests/test_readme_install.py` fails the suite when any of them carries an older tag or a divergent install-script URL.
 
 ## [0.1.0] - 2026-11-20
 

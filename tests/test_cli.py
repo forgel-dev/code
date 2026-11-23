@@ -985,7 +985,8 @@ class ReadmeTest(unittest.TestCase):
 
     def test_readme_has_a_pinned_install_command(self) -> None:
         self.assertIn(
-            "raw.githubusercontent.com/forgel-dev/code/v0.1.0/install.sh",
+            "curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/"
+            "install.sh | sh",
             self.readme,
         )
 
