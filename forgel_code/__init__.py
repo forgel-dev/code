@@ -1,3 +1,3 @@
 """Thin console client for Forgel over the engine's machine-readable commands."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
