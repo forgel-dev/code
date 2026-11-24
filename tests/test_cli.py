@@ -925,6 +925,7 @@ class NoEngineImportTest(unittest.TestCase):
         "pathlib",
         "subprocess",
         "sys",
+        "threading",
         "typing",
     }
 

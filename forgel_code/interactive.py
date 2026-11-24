@@ -2,9 +2,10 @@
 
 The owner writes sentences. The client turns one sentence into at most one of
 the engine's own commands, shows what the engine answered, and re-reads the
-task and release state from the engine after every request and before every
-prompt, so progress shows up without the owner asking for a status. It never
-calls a model, never reads a project and never runs a check.
+task and release state from the engine after every request, before every
+prompt, and repeatedly while the owner waits for a sentence, so progress shows
+up without the owner asking for a status. It never calls a model, never reads a
+project and never runs a check.
 
 The session speaks the owner's language: its own wording exists in English,
 Russian, French and Spanish, and the owner's sentence reaches the engine
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from typing import Any, Dict, List, Optional, Sequence, TextIO, Tuple
 
 from . import commands
@@ -24,6 +26,10 @@ from .session import Session
 
 # What the session prints while it waits for the owner.
 PROMPT = "forgel> "
+
+# How long the session waits for the owner before it re-reads the task and
+# release state from the engine on its own.
+IDLE_REFRESH_SECONDS = 0.5
 
 # Keys of an engine answer that are envelope, never part of the agent's reply.
 META_KEYS = frozenset(["ok", "engine", "command", "args", "project"])
@@ -1637,6 +1643,9 @@ class InteractiveSession:
         self.project: Optional[str] = store.project() if store.selected() else None
         self.lang = "en"
         self.last_state: Optional[str] = None
+        # The failure an idle refresh reported last, so one outage is stated
+        # once instead of on every cycle.
+        self.idle_failure: Optional[str] = None
 
     # -- output ---------------------------------------------------------
 
@@ -1675,18 +1684,10 @@ class InteractiveSession:
 
     # -- state ----------------------------------------------------------
 
-    def state_lines(self, quiet: bool = False) -> Optional[List[str]]:
-        """Read the task and release state from the engine.
-
-        ``quiet`` swallows a failure: the refresh must never turn into a wall
-        of text when the engine is briefly unreachable.
-        """
-        tasks = self.call(self.command("tasks"), quiet=quiet)
-        if tasks is None:
-            return None
-        status = self.call(self.command("status"), quiet=quiet)
-        if status is None:
-            return None
+    def read_state(self) -> List[str]:
+        """Read the task and release state from the engine, or raise for it."""
+        tasks = self.engine.run(self.command("tasks"))
+        status = self.engine.run(self.command("status"))
 
         lines = [self.project_line(), _message("tasks", self.lang)]
         entries = task_entries(tasks)
@@ -1699,6 +1700,28 @@ class InteractiveSession:
         lines.append(_message("release", self.lang) % release)
         return lines
 
+    def state_lines(self, quiet: bool = False) -> Optional[List[str]]:
+        """Read the task and release state from the engine.
+
+        ``quiet`` swallows a failure: a refresh must never turn into a wall of
+        text when the engine is briefly unreachable.
+        """
+        if self.stopped:
+            return None
+        try:
+            return self.read_state()
+        except EngineError as exc:
+            if not quiet:
+                self.show_failure(exc)
+            return None
+
+    def show_state(self, lines: Sequence[str]) -> None:
+        """Show the state only when it differs from what was shown last."""
+        text = "\n".join(lines)
+        if text != self.last_state:
+            self.last_state = text
+            self.write(text)
+
     def refresh(self, force: bool = False, quiet: bool = False) -> None:
         """Re-read the state and show it when it changed, without being asked."""
         if self.stopped:
@@ -1706,10 +1729,54 @@ class InteractiveSession:
         lines = self.state_lines(quiet=quiet)
         if lines is None:
             return
-        text = "\n".join(lines)
-        if force or text != self.last_state:
-            self.last_state = text
-            self.write(text)
+        if force:
+            self.last_state = "\n".join(lines)
+            self.write(self.last_state)
+        else:
+            self.show_state(lines)
+
+    def idle_refresh(self) -> None:
+        """Re-read the state while the owner waits and show a change.
+
+        A failure never ends the session: it is stated once per distinct
+        message, and the owner can still send the next sentence.
+        """
+        if self.stopped:
+            return
+        try:
+            lines = self.read_state()
+        except EngineError as exc:
+            if exc.message != self.idle_failure:
+                self.idle_failure = exc.message
+                self.show_failure(exc)
+            return
+        self.idle_failure = None
+        self.show_state(lines)
+
+    def wait_for_line(self) -> str:
+        """One line of owner input, re-reading the state while the owner waits.
+
+        The read itself runs in a background thread, so the session can look at
+        the engine between polls while the owner has submitted nothing. The
+        line is never touched: what was typed reaches the engine as typed, and
+        the end of input is still an empty line.
+        """
+        box: List[str] = []
+
+        def collect() -> None:
+            try:
+                box.append(self.input.readline())
+            except (OSError, ValueError):  # pragma: no cover - closed input
+                box.append("")
+
+        reader = threading.Thread(target=collect, daemon=True)
+        reader.start()
+        while not box and not self.stopped:
+            reader.join(IDLE_REFRESH_SECONDS)
+            if box or self.stopped:
+                break
+            self.idle_refresh()
+        return box[0] if box else ""
 
     # -- requests -------------------------------------------------------
 
@@ -1804,7 +1871,8 @@ class InteractiveSession:
                 # Keep the state current between requests, without being asked.
                 self.refresh(quiet=True)
                 self.write(PROMPT, end="")
-                line = self.input.readline()
+                # Re-read the state on its own while the owner has not typed.
+                line = self.wait_for_line()
                 if not line:
                     break
                 if not line.strip():
