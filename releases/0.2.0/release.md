@@ -6,7 +6,7 @@
 - Release train: `20261123193557155149_forgel-code-interactive-agent-client-instead-of-`
 - Preset: python
 - Version files: `forgel_code/__init__.py`
-- GitHub release: pending
+- GitHub release: https://github.com/forgel-dev/code/releases/tag/v0.2.0
 
 ## Tasks
 
