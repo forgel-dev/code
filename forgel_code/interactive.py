@@ -191,6 +191,204 @@ SENSITIVE_ACTIONS = (
     ((CHANGE_FORMS, CHANGE_STEMS), CONFIG_NOUNS),
 )
 
+# English and Russian name the action with a verb and the object it acts on,
+# like French and Spanish above. Russian inflects the object, so an object is
+# recognised by its stem; an English object is a listed word. A request needs
+# the verb of the action together with the object it acts on, in either order,
+# so a sentence that only mentions a key, the configuration or a project stays
+# ordinary conversation. The bare wording of every family is covered: a key
+# named without a credential term, a configuration named without the word
+# "configuration", and a project that is scaffolded rather than created.
+CREATE_VERB_FORMS = frozenset(
+    [
+        "make",
+        "makes",
+        "making",
+        "scaffold",
+        "scaffolds",
+        "scaffolding",
+        "bootstrap",
+        "bootstraps",
+        "bootstrapping",
+        "init",
+        "inits",
+        "generate",
+        "generates",
+        "generating",
+        "provision",
+        "provisions",
+        "provisioning",
+        "создай",
+        "создайте",
+        "создать",
+        "создам",
+        "создадим",
+        "сделай",
+        "сделайте",
+        "сделать",
+        "сделаем",
+        "сгенерируй",
+        "сгенерируйте",
+        "сгенерировать",
+        "заскаффолди",
+        "заскаффолдить",
+        "инициализируй",
+        "инициализируйте",
+        "инициализировать",
+        "заведи",
+        "заведите",
+        "завести",
+        "сформируй",
+        "сформируйте",
+        "сформировать",
+    ]
+)
+CREATE_VERB_STEMS = (
+    "creat",
+    "scaffold",
+    "bootstrap",
+    "initialis",
+    "initializ",
+    "generat",
+    "provision",
+)
+CHANGE_VERB_FORMS = CREATE_VERB_FORMS | frozenset(
+    [
+        "add",
+        "adds",
+        "added",
+        "adding",
+        "put",
+        "puts",
+        "putting",
+        "set",
+        "sets",
+        "setting",
+        "write",
+        "writes",
+        "writing",
+        "store",
+        "stores",
+        "stored",
+        "storing",
+        "save",
+        "saves",
+        "saved",
+        "saving",
+        "edit",
+        "edits",
+        "edited",
+        "editing",
+        "tune",
+        "tunes",
+        "tuned",
+        "tuning",
+        "измени",
+        "измените",
+        "изменить",
+        "изменим",
+        "поменяй",
+        "поменяйте",
+        "поменять",
+        "поменяем",
+        "смени",
+        "смените",
+        "сменить",
+        "обнови",
+        "обновите",
+        "обновить",
+        "обновим",
+        "установи",
+        "установите",
+        "установить",
+        "задай",
+        "задайте",
+        "задать",
+        "зададим",
+        "пропиши",
+        "пропишите",
+        "прописать",
+        "добавь",
+        "добавьте",
+        "добавить",
+        "сохрани",
+        "сохраните",
+        "сохранить",
+        "замени",
+        "замените",
+        "заменить",
+        "отредактируй",
+        "отредактируйте",
+        "отредактировать",
+        "редактируй",
+        "редактировать",
+        "настрой",
+        "настройте",
+        "настроить",
+        "настроим",
+        "сконфигурируй",
+        "сконфигурировать",
+    ]
+)
+CHANGE_VERB_STEMS = CREATE_VERB_STEMS + (
+    "chang",
+    "updat",
+    "modif",
+    "defin",
+    "assign",
+    "rotat",
+    "replac",
+    "renew",
+    "instal",
+    "configur",
+    "adjust",
+)
+KEY_NOUNS = frozenset(["key", "keys"])
+KEY_NOUN_STEMS = ("ключ",)
+CONFIGURATION_NOUNS = frozenset(
+    [
+        "config",
+        "configs",
+        "configuration",
+        "configurations",
+        "preference",
+        "preferences",
+        "settings",
+    ]
+)
+CONFIGURATION_NOUN_STEMS = (
+    "конфиг",
+    "настройк",
+    "опци",
+    "предпочтени",
+    "параметр",
+)
+SCAFFOLD_NOUNS = frozenset(["project", "projects"])
+SCAFFOLD_NOUN_STEMS = (
+    "проект",
+    "каркас",
+    "скелет",
+    "шаблон",
+    "заготовк",
+    "болванк",
+)
+
+# Which verbs ask for which object. Setting or changing a key or a
+# configuration takes a changing verb, which includes a creating one; creating
+# or scaffolding a project takes a creating verb only, so changing the selected
+# project stays an ordinary sentence.
+SENSITIVE_EN_RU_ACTIONS = (
+    ((CHANGE_VERB_FORMS, CHANGE_VERB_STEMS), (KEY_NOUNS, KEY_NOUN_STEMS)),
+    (
+        (CHANGE_VERB_FORMS, CHANGE_VERB_STEMS),
+        (CONFIGURATION_NOUNS, CONFIGURATION_NOUN_STEMS),
+    ),
+    (
+        (CREATE_VERB_FORMS, CREATE_VERB_STEMS),
+        (SCAFFOLD_NOUNS, SCAFFOLD_NOUN_STEMS),
+    ),
+)
+
 # Which words ask for which action. One sentence may name only one action.
 ACTIONS = (
     (
@@ -1337,14 +1535,18 @@ MESSAGES = {
         "en": (
             "adopting a repository, creating a project, setting a secret and "
             "changing configuration are explicit separate actions and are never "
-            "carried out from a sentence. Run the client's own command for it "
-            "outside the session."
+            "carried out from a sentence. For creating or scaffolding a project, "
+            "for setting, creating or changing a key, a password or a token, or "
+            "for changing the configuration, run the client's own explicit "
+            "command `forgel-code` outside the session."
         ),
         "ru": (
             "принятие репозитория, создание проекта, установка секрета и "
             "изменение конфигурации — отдельные явные действия и никогда не "
-            "выполняются по фразе. Выполните для этого собственную команду "
-            "клиента вне сеанса."
+            "выполняются по фразе. Для создания проекта или его каркаса, для "
+            "установки, создания или смены ключа, пароля или токена, а также "
+            "для изменения конфигурации выполните собственную явную команду "
+            "клиента `forgel-code` вне сеанса."
         ),
         "fr": (
             "adopter un dépôt, créer un projet, définir un secret et changer la "
@@ -1465,6 +1667,24 @@ def _asks_for_sensitive_action(folded: str) -> bool:
         if not any(word in forms or word.startswith(stems) for word in words):
             continue
         if any((" " + noun + " ") in sequence for noun in nouns):
+            return True
+    return False
+
+
+def _asks_for_explicit_action(folded: str) -> bool:
+    """Whether an English or Russian sentence asks for a sensitive action.
+
+    The request needs the verb of the action and the object it acts on, in
+    either order; a sentence that names only one of them stays ordinary
+    conversation.
+    """
+    words = _alpha_runs(folded)
+    if not words:
+        return False
+    for (verb_forms, verb_stems), (objects, object_stems) in SENSITIVE_EN_RU_ACTIONS:
+        if not any(word in verb_forms or word.startswith(verb_stems) for word in words):
+            continue
+        if any(word in objects or word.startswith(object_stems) for word in words):
             return True
     return False
 
@@ -2034,6 +2254,11 @@ def resolve(text: str) -> Dict[str, Any]:
     # The French and Spanish phrasings of the same actions are compared folded:
     # case, diacritics, punctuation and repeated whitespace carry no meaning.
     if _asks_for_sensitive_action(_fold(stripped)):
+        return {"kind": "sensitive"}
+
+    # English and Russian name the same actions with a verb and the object it
+    # acts on; only a sentence that names both asks for one of them.
+    if _asks_for_explicit_action(_fold(stripped)):
         return {"kind": "sensitive"}
 
     # A switch prefix may end the sentence, so the line is compared with a
