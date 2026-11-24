@@ -28,7 +28,10 @@ REPLY_ENGINE = textwrap.dedent(
 
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "say":
-        payload = {"ok": True, "reply": "the token: abc123 was stored"}
+        payload = {
+            "ok": True,
+            "reply": "'token': 'abc123' and the token: abc123 was stored",
+        }
     elif command == "tasks":
         payload = {
             "ok": True,
@@ -108,6 +111,64 @@ class RedactFormTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(interactive.redact(text), shown)
 
+    def test_a_single_quoted_label_keeps_its_quotes_and_masks_the_value(self) -> None:
+        for text, shown in (
+            ("'token': 'abc123'", "'token': '[redacted]'"),
+            ("'password'='hunter2'", "'password'='[redacted]'"),
+            ("the 'secret': 'swordfish' stays", "the 'secret': '[redacted]' stays"),
+            ("'api-key': 'ab-12 cd'", "'api-key': '[redacted]'"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_double_quoted_label_keeps_its_quotes_and_masks_the_value(self) -> None:
+        for text, shown in (
+            ('"token": "abc123"', '"token": "[redacted]"'),
+            ('"password" = "hunter2 and more"', '"password" = "[redacted]"'),
+            ('"secret" : "swordfish"', '"secret" : "[redacted]"'),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_json_style_label_masks_its_value(self) -> None:
+        for text, shown in (
+            ('{"token":"abc123"}', '{"token":"[redacted]"}'),
+            ('{"password":"hunter2"}', '{"password":"[redacted]"}'),
+            (
+                '{"key": "abc123", "release": "0.1.1"}',
+                '{"key": "[redacted]", "release": "0.1.1"}',
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_quoted_label_masks_an_unquoted_value(self) -> None:
+        for text, shown in (
+            ("'token': abc123 now", "'token': [redacted] now"),
+            ('"password": hunter2, rest', '"password": [redacted], rest'),
+            ("'secret'=swordfish", "'secret'=[redacted]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_quoted_label_keeps_repeated_separators_visible(self) -> None:
+        for text, shown in (
+            ("'token':: abc123", "'token':: [redacted]"),
+            ('"token" == "abc123"', '"token" == "[redacted]"'),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_quoted_label_does_not_mask_its_neighbours(self) -> None:
+        for text in (
+            'the word "token" appears here',
+            "say 'password' please",
+            '"secret" is missing',
+            "the 'token' was rotated.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), text)
+
     def test_a_whitespace_joined_value_still_is_masked(self) -> None:
         self.assertEqual(interactive.redact("token abc"), "token [redacted]")
         self.assertEqual(interactive.redact("the token abc"), "the token [redacted]")
@@ -171,20 +232,38 @@ class RedactFormTest(unittest.TestCase):
             "Authorization: Bearer abc123",
             "пароль: hunter2",
             "db_password=hunter2",
+            "'token': 'abc123'",
+            '"token": "abc123"',
+            '{"token":"abc123"}',
+            "'token': abc123",
         ):
             with self.subTest(text=text):
                 once = interactive.redact(text)
                 self.assertEqual(interactive.redact(once), once)
                 self.assertIn("[redacted]", once)
+                self.assertEqual(once.count("[redacted]"), 1)
 
     def test_each_masked_value_carries_exactly_one_marker(self) -> None:
         for text in (
             "password: hunter2",
             "password==hunter2",
             'password: "hunter2 and more"',
+            "'token': 'abc123'",
+            '"token": "abc123"',
+            '{"token":"abc123"}',
         ):
             with self.subTest(text=text):
                 self.assertEqual(interactive.redact(text).count("[redacted]"), 1)
+
+    def test_no_character_of_a_quoted_secret_stays_visible(self) -> None:
+        for text, secret in (
+            ("'token': 'abc123'", "abc123"),
+            ('"token": "abc123"', "abc123"),
+            ('{"token":"abc123"}', "abc123"),
+            ("'token': abc123 tail", "abc123"),
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn(secret, interactive.redact(text))
 
 
 class ScreenMaskingTest(unittest.TestCase):
@@ -215,6 +294,11 @@ class ScreenMaskingTest(unittest.TestCase):
         text = self.run_session(REPLY_ENGINE, ["hello there"])
         self.assertNotIn("abc123", text)
         self.assertIn("token: [redacted]", text)
+
+    def test_a_quoted_label_in_an_engine_reply_is_masked(self) -> None:
+        text = self.run_session(REPLY_ENGINE, ["hello there"])
+        self.assertNotIn("abc123", text)
+        self.assertIn("'token': '[redacted]'", text)
 
     def test_engine_state_shown_in_the_session_is_masked(self) -> None:
         text = self.run_session(REPLY_ENGINE, ["hello there"])

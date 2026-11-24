@@ -1320,6 +1320,41 @@ def _bound_value(text: str, start: int) -> Optional[Tuple[int, int]]:
     return span
 
 
+def _label_quote_end(text: str, quote: int) -> Optional[int]:
+    """The position after a quote that closes a quoted label.
+
+    A label may be written inside quotation marks, as in ``'token': 'abc'``.
+    The quote closes the label when no value character touches it: a quote
+    glued to a word opens the value instead, so it stays the opening quote of
+    the value. A separator after the quote still follows the label.
+    """
+    after = quote + 1
+    if after >= len(text):
+        return after
+    following = text[after]
+    if following in "=:":
+        return after
+    if following.isalnum() or following in VALUE_MARKS:
+        return None
+    return after
+
+
+def _quoted_binding(text: str, after: int) -> Optional[Tuple[int, int]]:
+    """The value bound to a quoted label, whose closing quote ends at ``after``.
+
+    A quoted label binds its value through a separator or as a quoted run next
+    to it; a word that merely follows the quoted label mentions it instead.
+    """
+    position = _skip_spaces(text, after)
+    if position >= len(text):
+        return None
+    if text[position] in "=:":
+        return _bound_value(text, _separator_end(text, position))
+    if text[position] in _QUOTE_PAIRS:
+        return _span(text, position)
+    return None
+
+
 def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]:
     """The span of the value bound to the label that starts at ``start``."""
     while True:
@@ -1327,6 +1362,10 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
             return None
         character = text[label_end]
         if character in _QUOTE_PAIRS:
+            quoted = _label_quote_end(text, label_end)
+            if quoted is not None:
+                # The quote closes the label, so the binding starts after it.
+                return _quoted_binding(text, quoted)
             return _span(text, label_end)
         if character in "=:":
             return _bound_value(text, _separator_end(text, label_end))
