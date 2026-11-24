@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="forgel-code",
         description=(
             "Thin console client for Forgel over the engine's machine-readable "
-            "commands. Run it without a command to open the interactive session."
+            "commands."
         ),
         parents=[global_options],
     )
