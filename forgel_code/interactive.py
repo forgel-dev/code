@@ -1807,8 +1807,12 @@ class InteractiveSession:
             return None
 
     def show_state(self, lines: Sequence[str]) -> None:
-        """Show the state only when it differs from what was shown last."""
-        text = "\n".join(lines)
+        """Show the state only when it differs from what was shown last.
+
+        The text is masked before it is kept, so the copy the session holds is
+        exactly what the screen showed and a later repeat stays masked.
+        """
+        text = redact("\n".join(lines))
         if text != self.last_state:
             self.last_state = text
             self.write(text)
@@ -1821,7 +1825,7 @@ class InteractiveSession:
         if lines is None:
             return
         if force:
-            self.last_state = "\n".join(lines)
+            self.last_state = redact("\n".join(lines))
             self.write(self.last_state)
         else:
             self.show_state(lines)
@@ -1830,15 +1834,18 @@ class InteractiveSession:
         """Re-read the state while the owner waits and show a change.
 
         A failure never ends the session: it is stated once per distinct
-        message, and the owner can still send the next sentence.
+        message, and the owner can still send the next sentence. The message
+        is masked before it is kept, so the retained failure is the text the
+        screen showed.
         """
         if self.stopped:
             return
         try:
             lines = self.read_state()
         except EngineError as exc:
-            if exc.message != self.idle_failure:
-                self.idle_failure = exc.message
+            failure = redact(exc.message)
+            if failure != self.idle_failure:
+                self.idle_failure = failure
                 self.show_failure(exc)
             return
         self.idle_failure = None
