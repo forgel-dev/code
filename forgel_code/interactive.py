@@ -869,6 +869,8 @@ REDACTED = "[redacted]"
 # A label is one word, or a compound name whose segments are joined by "_",
 # "." or "-".
 _LABEL_JOINERS = "._-"
+# The joiners that keep a several-word secret label one label.
+_JOINED_LABEL_JOINERS = "_-"
 # Whitespace between a label and its value; a line break separates them too.
 _WHITESPACE = " \t\r\n\f\v"
 # Whitespace that keeps the line: a line break closes the clause.
@@ -1558,10 +1560,20 @@ def _segments(label: str) -> List[str]:
     return parts
 
 
+def _joined_phrase(label: str) -> bool:
+    """Whether a label joins the words of a several-word secret label."""
+    joiners = {character for character in label if character in _LABEL_JOINERS}
+    if not joiners or not joiners <= set(_JOINED_LABEL_JOINERS):
+        return False
+    return tuple(_segments(label)) in SECRET_PHRASES
+
+
 def _secret_label(label: str) -> bool:
     """Whether a label word or compound name bears a secret."""
     lowered = label.lower()
     if lowered in SECRET_WORDS or _plain(lowered) in SECRET_WORDS_FOLDED:
+        return True
+    if _joined_phrase(_plain(lowered)):
         return True
     for segment in _segments(lowered):
         if segment in SECRET_WORDS or segment.startswith(SECRET_STEMS):
