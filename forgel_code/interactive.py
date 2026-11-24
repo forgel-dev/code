@@ -1258,6 +1258,11 @@ def _is_prose(token: str) -> bool:
     return _bare(token) in PROSE_WORDS and not _carries_markers(token)
 
 
+def _is_narrative(token: str) -> bool:
+    """Whether a word reports on the work instead of naming a value."""
+    return _bare(token) in NARRATIVE_WORDS and not _carries_markers(token)
+
+
 def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
     """The characters of the one value at ``start``, a quoted run included.
 
@@ -1372,6 +1377,66 @@ def _bound_value(
     return span
 
 
+def _copula_span(text: str, after: int) -> Optional[Tuple[int, int]]:
+    """The value a copula hands to the word after it, if that word is one."""
+    position = _skip_gap(text, after)
+    if position >= len(text):
+        return None
+    if text[position] in "=:":
+        return _bound_value(text, _separator_end(text, position), True)
+    span = _bound_value(text, after)
+    if span is None:
+        return None
+    token = text[span[0]:span[1]]
+    if _is_narrative(token):
+        # ``the token is missing`` names no credential.
+        return None
+    if _bare(token) in FUNCTION_WORDS and not _carries_markers(token):
+        # An ordinary filler word still leaves the value after it.
+        return _descriptor_span(text, span[0])
+    return span
+
+
+def _descriptor_span(text: str, start: int) -> Optional[Tuple[int, int]]:
+    """The value behind the ordinary words that stand between label and value.
+
+    ``token value is VALUE``, ``token value: VALUE`` and ``token label VALUE``
+    keep the descriptor words visible and hide the value; a word that carries
+    value markers is itself the key material.
+    """
+    end = _label_end(text, start)
+    if end is None:
+        return _bound_value(text, start)
+    token = text[start:end]
+    if _carries_markers(token):
+        return _bound_value(text, start)
+    word = _bare(token)
+    if word in COPULAS:
+        return _copula_span(text, end)
+    if word in AUTH_SCHEMES:
+        return _scheme_value(text, end)
+    after = _skip_gap(text, end)
+    if after >= len(text):
+        # The word closes the sentence, so it is the value the label binds.
+        return start, end
+    if text.startswith(REDACTED, after):
+        return after, after + len(REDACTED)
+    if text[after] in "=:":
+        return _bound_value(text, _separator_end(text, after), True)
+    if text[after] in _QUOTE_PAIRS:
+        return _span(text, after)
+    following = _label_end(text, after)
+    if following is None:
+        return start, end
+    if _bare(text[after:following]) in COPULAS:
+        return _copula_span(text, following)
+    if _is_narrative(text[after:following]):
+        # The descriptor merely reports on the label; no value follows it.
+        return None
+    # Another ordinary word stands between the label and the value.
+    return _descriptor_span(text, after)
+
+
 def _label_quote_end(text: str, quote: int) -> Optional[int]:
     """The position after a quote that closes a quoted label.
 
@@ -1445,19 +1510,12 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
             continue
         if word in COPULAS:
             # ``the token is VALUE``: the copula stays, the word after decides.
-            position = _skip_gap(text, following)
-            if position < len(text) and text[position] in "=:":
-                return _bound_value(text, _separator_end(text, position), True)
-            span = _bound_value(text, following)
-            if span is None:
-                return None
-            if _is_prose(text[span[0]:span[1]]):
-                return None
-            return span
+            return _copula_span(text, following)
         if _is_prose(text[after:following]):
             # The label is mentioned, not bound to a value.
             return None
-        return _bound_value(text, after)
+        # An ordinary descriptor may stand between the label and its value.
+        return _descriptor_span(text, after)
 
 
 def redact(text: str) -> str:

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Mask the credential of a label followed by an ordinary descriptor word — a secret label followed by a word such as `value`, `field` or `string` used to hide that descriptor and leave the credential itself on screen and in the retained state; the descriptor now stays readable and the value, including the one behind a copula or a separator, is replaced by the existing masking placeholder. Sentences that only mention a secret word are still shown unchanged.
 - Remove the PATH block from the profile named by `FORGEL_CODE_PROFILE` — `--uninstall` again cleans the marked block out of the profile the override variable names, in addition to the six standard profile files, so a block left by a completed install or by an install that failed its fresh-shell check no longer survives.
 - Point the README install, update and uninstall commands at the current `v0.1.1` release installer — the documented commands no longer fetch the stale install script, all three name one and the same install-script URL, and the guard in `tests/test_readme_install.py` fails the suite when any of them carries an older tag or a divergent install-script URL.
 
