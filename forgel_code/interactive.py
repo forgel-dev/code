@@ -1000,12 +1000,37 @@ SPANISH_WORDS = frozenset(
     ]
 )
 
+# The action words of the sensitive requests are signals of their own
+# language: a phrase that names one of them is answered in that language, so
+# the refusal it gets speaks the owner's language even when every other word
+# of the phrase belongs to both Latin languages at once.
+FRENCH_WORDS = FRENCH_WORDS | frozenset(
+    ["créer", "cree", "définir", "definis", "définis", "changer", "configurer"]
+)
+SPANISH_WORDS = SPANISH_WORDS | frozenset(
+    [
+        "asignar",
+        "clave",
+        "crea",
+        "crear",
+        "nueva",
+        "nuevas",
+        "nuevo",
+        "nuevos",
+    ]
+)
+
 # The elided words of French: ``l'état``, ``qu'il``, ``c'est``. English
 # contractions elide a whole word that is never one of these.
 FRENCH_ELISIONS = frozenset(
     ["c", "d", "j", "jusqu", "l", "lorsqu", "m", "n", "puisqu", "qu", "s", "t"]
 )
 APOSTROPHES = "'’"
+
+# The explicit command surface that already performs these actions: the
+# client's own command line, run outside the session. It is one surface for
+# all three action families, so the refusal names it for each of them.
+EXPLICIT_COMMAND = "`forgel-code`"
 
 # The session's own wording, in every language it speaks. The set of sentences
 # is the same in all four: a key is never missing from one of them.
@@ -1169,14 +1194,18 @@ MESSAGES = {
         "fr": (
             "adopter un dépôt, créer un projet, définir un secret et changer la "
             "configuration sont des actions explicites et séparées et ne sont "
-            "jamais exécutées à partir d'une phrase. Lancez la commande propre "
-            "au client hors de la session."
+            "jamais exécutées à partir d'une phrase. Pour créer un projet, pour "
+            "définir un mot de passe, un jeton ou une clé, ou pour changer la "
+            "configuration, lancez la commande explicite `forgel-code` hors de "
+            "la session."
         ),
         "es": (
             "adoptar un repositorio, crear un proyecto, definir un secreto y "
             "cambiar la configuración son acciones explícitas y separadas y "
-            "nunca se ejecutan a partir de una frase. Ejecute el comando propio "
-            "del cliente fuera de la sesión."
+            "nunca se ejecutan a partir de una frase. Para crear un proyecto, "
+            "para definir una contraseña, un token o una clave, o para cambiar "
+            "la configuración, ejecute el comando explícito `forgel-code` fuera "
+            "de la sesión."
         ),
     },
     "failure": {

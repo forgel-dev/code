@@ -83,8 +83,9 @@ RUSSIAN = "\u043f\u0440\u0438\u0432\u0435\u0442, \u0447\u0442\u043e \u043f\u043e
 
 # The sensitive explicit actions of the session, written as ordinary French and
 # Spanish sentences: another verb form, another word order and the same words
-# without diacritics are the same request.
-FRENCH_SENSITIVE = (
+# without diacritics are the same request. The audited ones carry a signal of
+# their language, so the session answers them in it.
+FRENCH_AUDITED = (
     "cr\u00e9e un projet",
     "cr\u00e9er un projet",
     "je veux cr\u00e9er un projet",
@@ -92,25 +93,42 @@ FRENCH_SENSITIVE = (
     "un nouveau projet",
     "d\u00e9finir le mot de passe",
     "d\u00e9finis le mot de passe",
+    "definis le mot de passe",
     "mettre \u00e0 jour la configuration",
     "changer la configuration",
     "d\u00e9finir le jeton d'acc\u00e8s",
 )
-SPANISH_SENSITIVE = (
+SPANISH_AUDITED = (
     "crear un proyecto",
     "crea un proyecto",
     "quiero crear un proyecto",
     "un proyecto nuevo",
     "definir la contrase\u00f1a",
-    "definir la contrasena",
-    "asignar la clave",
     "cambiar la configuraci\u00f3n",
     "cambiar la configuracion",
     "modificar los par\u00e1metros",
 )
+FRENCH_SENSITIVE = FRENCH_AUDITED
+SPANISH_SENSITIVE = SPANISH_AUDITED + (
+    "definir la contrasena",
+    "asignar la clave",
+)
 
 # The audited phrases together with their low-variation forms.
 REFUSED = FRENCH_SENSITIVE + SPANISH_SENSITIVE
+
+# The action families the refusal names for the owner, in the language of the
+# message: creating a project, a credential and the configuration.
+EXPLICIT_REDIRECT = {
+    "fr": ("cr\u00e9er un projet", "mot de passe", "configuration"),
+    "es": ("crear un proyecto", "contrase\u00f1a", "configuraci\u00f3n"),
+}
+
+# The statement of the boundary that opens every refusal, before the pointer.
+BOUNDARY_STATEMENT = {
+    "fr": "jamais ex\u00e9cut\u00e9es \u00e0 partir d'une phrase",
+    "es": "nunca se ejecutan a partir de una frase",
+}
 
 ORDINARY = (
     "bonjour, quelle est la version du projet ?",
@@ -283,15 +301,47 @@ class SensitiveRefusalTest(LocalizationCase):
                     self.assertNotEqual(call[0], "task")
                     self.assertNotIn(phrase, " ".join(call))
 
-    def test_a_french_refusal_reads_in_the_existing_style(self) -> None:
-        _, text = self.run_session(["cr\u00e9e un projet"])
-        reply = self.reply_of_first_message(text)
-        self.assertIn(interactive.MESSAGES["sensitive"]["fr"], reply)
+    def test_a_french_refusal_names_the_explicit_commands(self) -> None:
+        for phrase in FRENCH_AUDITED:
+            with self.subTest(phrase=phrase):
+                self.log.unlink(missing_ok=True)
+                _, text = self.run_session([phrase])
+                reply = self.reply_of_first_message(text)
+                self.assertIn(interactive.MESSAGES["sensitive"]["fr"], reply)
+                self.assertIn(interactive.EXPLICIT_COMMAND, reply)
+                self.assert_wording(reply, EXPLICIT_REDIRECT["fr"])
+                self.assertEqual(
+                    [call for call in self.calls() if call and call[0] == "say"],
+                    [],
+                )
 
-    def test_a_spanish_refusal_reads_in_the_existing_style(self) -> None:
-        _, text = self.run_session(["\u00bfpuedo crear un proyecto?"])
-        reply = self.reply_of_first_message(text)
-        self.assertIn(interactive.MESSAGES["sensitive"]["es"], reply)
+    def test_a_spanish_refusal_names_the_explicit_commands(self) -> None:
+        for phrase in SPANISH_AUDITED:
+            with self.subTest(phrase=phrase):
+                self.log.unlink(missing_ok=True)
+                _, text = self.run_session([phrase])
+                reply = self.reply_of_first_message(text)
+                self.assertIn(interactive.MESSAGES["sensitive"]["es"], reply)
+                self.assertIn(interactive.EXPLICIT_COMMAND, reply)
+                self.assert_wording(reply, EXPLICIT_REDIRECT["es"])
+                self.assertEqual(
+                    [call for call in self.calls() if call and call[0] == "say"],
+                    [],
+                )
+
+    def test_the_refusals_of_english_and_russian_keep_their_wording(self) -> None:
+        for phrase, language in (
+            ("create a project", "en"),
+            ("set the api key", "en"),
+            ("\u0441\u043e\u0437\u0434\u0430\u0439 \u043f\u0440\u043e\u0435\u043a\u0442", "ru"),
+            ("\u043f\u043e\u043c\u0435\u043d\u044f\u0439 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044e", "ru"),
+        ):
+            with self.subTest(phrase=phrase):
+                _, text = self.run_session([phrase])
+                reply = self.reply_of_first_message(text)
+                self.assertIn(interactive.MESSAGES["sensitive"][language], reply)
+                self.assertNotIn(interactive.MESSAGES["sensitive"]["fr"], reply)
+                self.assertNotIn(interactive.MESSAGES["sensitive"]["es"], reply)
 
     def test_ordinary_french_and_spanish_reach_the_engine_unchanged(self) -> None:
         self.env["SESSION_STUB_ECHO"] = "1"
@@ -301,6 +351,22 @@ class SensitiveRefusalTest(LocalizationCase):
                 _, text = self.run_session([phrase])
                 self.assertIn("echo: " + phrase, text)
                 self.assertIn(["say", "--text", phrase, "--json"], self.calls())
+
+
+class SensitiveWordingTest(unittest.TestCase):
+    """The refusal of the four languages states the boundary, then the command."""
+
+    def test_the_french_and_spanish_refusals_name_the_explicit_command(self) -> None:
+        for language in ("fr", "es"):
+            with self.subTest(language=language):
+                message = interactive.MESSAGES["sensitive"][language]
+                self.assertIn(interactive.EXPLICIT_COMMAND, message)
+                for fragment in EXPLICIT_REDIRECT[language]:
+                    self.assertIn(fragment, message)
+                self.assertLess(
+                    message.index(BOUNDARY_STATEMENT[language]),
+                    message.rindex(interactive.EXPLICIT_COMMAND),
+                )
 
 
 class WordingSetTest(unittest.TestCase):
