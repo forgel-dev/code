@@ -3,7 +3,7 @@
 #
 # One command installs the client into a per-user prefix:
 #
-#   curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh | sh
 #
 # The client goes into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}, the
 # ``forgel-code`` launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, and that
@@ -28,7 +28,7 @@
 #   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
 #   FORGEL_CODE_BIN             launcher directory (default: $HOME/.local/bin)
 #   FORGEL_CODE_SOURCE          local checkout to install from, without network
-#   FORGEL_CODE_TAG             repository tag when no checkout is given (default: v0.1.1)
+#   FORGEL_CODE_TAG             repository tag when no checkout is given (default: v0.2.0)
 #   FORGEL_CODE_REPOSITORY      repository URL used with FORGEL_CODE_TAG
 #   FORGEL_CODE_PYTHON          Python 3 interpreter (default: python3 on PATH)
 #   FORGEL_CODE_PROFILE         shell profile to edit (default: chosen from the login shell)
@@ -55,7 +55,7 @@ HOME_DIR=${HOME:-/}
 PREFIX=${FORGEL_CODE_HOME:-$HOME_DIR/.local/share/forgel-code}
 BIN_DIR=${FORGEL_CODE_BIN:-$HOME_DIR/.local/bin}
 LAUNCHER=$BIN_DIR/forgel-code
-TAG=${FORGEL_CODE_TAG:-v0.1.1}
+TAG=${FORGEL_CODE_TAG:-v0.2.0}
 REPOSITORY=${FORGEL_CODE_REPOSITORY:-https://github.com/forgel-dev/code}
 
 # What a fresh shell reports back: its own PATH and the path it resolves
