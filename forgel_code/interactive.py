@@ -616,6 +616,10 @@ REDACTED = "[redacted]"
 _LABEL_JOINERS = "._-"
 # Whitespace between a label and its value; a line break separates them too.
 _WHITESPACE = " \t\r\n\f\v"
+# Whitespace that keeps the line: a line break closes the clause.
+_INLINE_WHITESPACE = " \t\r\f\v"
+# Punctuation that closes a clause right after the word before it.
+_CLAUSE_END = frozenset(",;.!?)]}>»\"'`")
 # Quote characters that open a value and the character that closes it.
 _QUOTE_PAIRS = {'"': '"', "'": "'", "`": "`", "«": "»"}
 # Quote characters that dress a value; stripping them compares the bare word.
@@ -1263,6 +1267,18 @@ def _is_narrative(token: str) -> bool:
     return _bare(token) in NARRATIVE_WORDS and not _carries_markers(token)
 
 
+def _closes_clause(text: str, start: int) -> bool:
+    """Whether only a line break or clause punctuation follows ``start``."""
+    position = start
+    while position < len(text) and text[position] in _INLINE_WHITESPACE:
+        position += 1
+    if position >= len(text):
+        return True
+    if text[position] == "\n":
+        return True
+    return text[position] in _CLAUSE_END
+
+
 def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
     """The characters of the one value at ``start``, a quoted run included.
 
@@ -1459,8 +1475,10 @@ def _label_quote_end(text: str, quote: int) -> Optional[int]:
 def _quoted_binding(text: str, after: int) -> Optional[Tuple[int, int]]:
     """The value bound to a quoted label, whose closing quote ends at ``after``.
 
-    A quoted label binds its value through a separator or as a quoted run next
-    to it; a word that merely follows the quoted label mentions it instead.
+    A quoted label binds its value through a separator, through a quoted run
+    next to it, or through the bare word that follows it when that word is a
+    value: one that closes the clause or carries value markers. A word that
+    merely continues the sentence mentions the quoted label instead.
     """
     position = _skip_gap(text, after)
     if position >= len(text):
@@ -1469,7 +1487,24 @@ def _quoted_binding(text: str, after: int) -> Optional[Tuple[int, int]]:
         return _bound_value(text, _separator_end(text, position), True)
     if text[position] in _QUOTE_PAIRS:
         return _span(text, position)
-    return None
+    end = _label_end(text, position)
+    if end is None:
+        return None
+    token = text[position:end]
+    word = _bare(token)
+    if word in AUTH_SCHEMES:
+        # ``'token' Bearer VALUE``: the scheme word stays, the value goes.
+        return _scheme_value(text, end)
+    if word in COPULAS:
+        # ``'token' is VALUE``: the copula stays, the word after decides.
+        return _copula_span(text, end)
+    if _is_prose(token):
+        # The quoted word is mentioned, not bound to a value.
+        return None
+    if not _carries_markers(token) and not _closes_clause(text, end):
+        # A plain word still followed by the sentence mentions the label.
+        return None
+    return _span(text, position)
 
 
 def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]:
