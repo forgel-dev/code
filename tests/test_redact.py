@@ -56,6 +56,23 @@ ERROR_ENGINE = textwrap.dedent(
     """
 )
 
+# An engine whose reply puts the values of a label on the next line and
+# prefixes them with punctuation.
+NEWLINE_REPLY_ENGINE = textwrap.dedent(
+    """\
+    import json
+    import sys
+
+    payload = {
+        "ok": True,
+        "reply": "stored values:" + chr(10) + "password:" + chr(10) + "hunter2"
+        + chr(10) + "token: !abc123"
+    }
+    sys.stdout.write(json.dumps(payload) + chr(10))
+    sys.stdout.flush()
+    """
+)
+
 
 def _launcher(directory: Path, script: str) -> Path:
     stub = directory / "redact_stub.py"
@@ -266,6 +283,107 @@ class RedactFormTest(unittest.TestCase):
                 self.assertNotIn(secret, interactive.redact(text))
 
 
+class LineBreakAndPunctuationFormTest(unittest.TestCase):
+    def test_a_value_on_the_line_after_a_colon_is_masked(self) -> None:
+        self.assertEqual(
+            interactive.redact("password:\nhunter2"), "password:\n[redacted]"
+        )
+        self.assertEqual(
+            interactive.redact("token=\nabc123"), "token=\n[redacted]"
+        )
+
+    def test_a_value_on_the_line_after_the_label_is_masked(self) -> None:
+        self.assertEqual(
+            interactive.redact("password\nhunter2"), "password\n[redacted]"
+        )
+        self.assertEqual(
+            interactive.redact("the token\nabc123"), "the token\n[redacted]"
+        )
+
+    def test_any_whitespace_with_a_line_break_separates(self) -> None:
+        for text, shown in (
+            ("password:\r\nhunter2", "password:\r\n[redacted]"),
+            ("password: \n \t hunter2", "password: \n \t [redacted]"),
+            ("пароль=\nhunter2", "пароль=\n[redacted]"),
+            ("aws.secret.key: \nhunter2", "aws.secret.key: \n[redacted]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_other_lines_stay_character_for_character(self) -> None:
+        text = "release: 0.1.1\npassword: hunter2\nstate: open\n"
+        self.assertEqual(
+            interactive.redact(text),
+            "release: 0.1.1\npassword: [redacted]\nstate: open\n",
+        )
+
+    def test_a_value_on_the_next_line_keeps_the_line_count(self) -> None:
+        text = "first line\npassword:\nhunter2\nlast line\n"
+        shown = interactive.redact(text)
+        self.assertEqual(shown.count("\n"), text.count("\n"))
+        self.assertEqual(shown, "first line\npassword:\n[redacted]\nlast line\n")
+
+    def test_punctuation_before_a_value_is_masked_with_it(self) -> None:
+        for text, shown in (
+            ("password: !hunter2", "password: [redacted]"),
+            ("password: !hunter2 and more", "password: [redacted] and more"),
+            ("password == !hunter2", "password == [redacted]"),
+            ("token=@abc123", "token=[redacted]"),
+            ("secret: #swordfish", "secret: [redacted]"),
+            ("aws.secret.key: !abc-123", "aws.secret.key: [redacted]"),
+            ("пароль: !hunter2", "пароль: [redacted]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_bracketed_value_is_masked_with_its_brackets(self) -> None:
+        for text, shown in (
+            ("password: [hunter2]", "password: [redacted]"),
+            ("token=[abc123]", "token=[redacted]"),
+            ("secret: [swordfish and more]", "secret: [redacted]"),
+            ("пароль: [hunter2]", "пароль: [redacted]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), shown)
+
+    def test_a_label_without_a_value_stays_as_written(self) -> None:
+        for text in (
+            "password:",
+            "password:\n",
+            "password:\n\n",
+            "the secret:",
+            "the token\nis missing",
+            "the password\nwas rotated",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), text)
+
+    def test_secret_free_multiline_text_is_unchanged(self) -> None:
+        for text in (
+            "release: 0.1.1 open\nstate: open\n",
+            "tasks: (none)\n-- punctuation, spacing and wording stay!\n",
+            "нажмите на кнопку (дважды)!\nи ещё раз\n",
+            "line one\nline two\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(interactive.redact(text), text)
+
+    def test_the_new_forms_are_idempotent_and_carry_one_marker(self) -> None:
+        for text, secret in (
+            ("password:\nhunter2", "hunter2"),
+            ("password\nhunter2", "hunter2"),
+            ("password: !hunter2", "hunter2"),
+            ("token=@abc123", "abc123"),
+            ("password: [hunter2]", "hunter2"),
+            ("пароль=\nhunter2", "hunter2"),
+        ):
+            with self.subTest(text=text):
+                once = interactive.redact(text)
+                self.assertNotIn(secret, once)
+                self.assertEqual(once.count("[redacted]"), 1)
+                self.assertEqual(interactive.redact(once), once)
+
+
 class ScreenMaskingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -309,6 +427,12 @@ class ScreenMaskingTest(unittest.TestCase):
         text = self.run_session(ERROR_ENGINE, ["hello there"])
         self.assertNotIn("hunter2", text)
         self.assertIn("[redacted]", text)
+
+    def test_a_value_on_the_next_line_of_a_reply_is_masked(self) -> None:
+        text = self.run_session(NEWLINE_REPLY_ENGINE, ["hello there"])
+        self.assertNotIn("hunter2", text)
+        self.assertIn("password:\n[redacted]", text)
+        self.assertIn("token: [redacted]", text)
 
 
 if __name__ == "__main__":

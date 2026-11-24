@@ -614,13 +614,17 @@ REDACTED = "[redacted]"
 # A label is one word, or a compound name whose segments are joined by "_",
 # "." or "-".
 _LABEL_JOINERS = "._-"
-_SPACES = " \t"
+# Whitespace between a label and its value; a line break separates them too.
+_WHITESPACE = " \t\r\n\f\v"
 # Quote characters that open a value and the character that closes it.
 _QUOTE_PAIRS = {'"': '"', "'": "'", "`": "`", "«": "»"}
 # Quote characters that dress a value; stripping them compares the bare word.
 _QUOTES = "\"'`«»"
 # A value never starts with punctuation that merely closes a clause.
 _NOT_A_VALUE = frozenset(",;:!?)]}>»[")
+# Brackets that may enclose the value written after an explicit separator; the
+# whole run is hidden, the brackets included.
+_VALUE_BRACKETS = {"[": "]"}
 # Punctuation after a value closes the clause; it is not part of the value.
 _TRAILING = frozenset(",;:!?.)]}>»\"'`")
 # Characters that mark a bare word as key material rather than as prose.
@@ -1225,8 +1229,9 @@ def _secret_label(label: str) -> bool:
     return False
 
 
-def _skip_spaces(text: str, start: int) -> int:
-    while start < len(text) and text[start] in _SPACES:
+def _skip_gap(text: str, start: int) -> int:
+    """The position after the whitespace that may separate a label and a value."""
+    while start < len(text) and text[start] in _WHITESPACE:
         start += 1
     return start
 
@@ -1284,15 +1289,59 @@ def _span(text: str, start: int) -> Optional[Tuple[int, int]]:
     return start, end
 
 
+def _marked_span(text: str, start: int) -> Tuple[int, int]:
+    """The punctuation at ``start`` and the value it introduces.
+
+    A bracketed run is hidden whole, the brackets included; any other
+    punctuation belongs to the value that follows it, on the value's own line.
+    """
+    limit = len(text)
+    newline = text.find("\n", start)
+    if newline >= 0:
+        limit = newline
+    closing = _VALUE_BRACKETS.get(text[start])
+    if closing is not None:
+        found = text.find(closing, start + 1, limit)
+        if found >= 0:
+            return start, found + 1
+    end = start
+    while end < limit and not text[end].isspace():
+        end += 1
+    while end > start + 1 and text[end - 1] in _TRAILING:
+        end -= 1
+    return start, end
+
+
+def _explicit_span(text: str, start: int) -> Optional[Tuple[int, int]]:
+    """The value after an explicit ':' or '=' separator, if there is one.
+
+    Quotation marks still stay visible around the marker; punctuation that
+    introduces the value becomes part of it, so the marker replaces both.
+    """
+    if start >= len(text) or text[start].isspace():
+        return None
+    if text.startswith(REDACTED, start):
+        return start, start + len(REDACTED)
+    if text[start] in _QUOTE_PAIRS:
+        return _span(text, start)
+    if text[start].isalnum() or text[start] == "_":
+        return _span(text, start)
+    span = _marked_span(text, start)
+    if not any(character.isalnum() for character in text[span[0]:span[1]]):
+        # Punctuation alone carries no value: the label is merely punctuated.
+        return None
+    return span
+
+
 def _separator_end(text: str, start: int) -> int:
-    """The end of a run of ':' and '=' separators, spaces included.
+    """The end of a run of ':' and '=' separators, whitespace included.
 
     Every separator character stays visible; only the value after the whole
     run is masked.
     """
     position = start
     while position < len(text) and (
-        text[position] in "=:" or text[position] in _SPACES
+        text[position] in "=:" or text[position] in _WHITESPACE
     ):
         position += 1
     return position
@@ -1300,7 +1349,7 @@ def _separator_end(text: str, start: int) -> int:
 
 def _scheme_value(text: str, after: int) -> Optional[Tuple[int, int]]:
     """The credential after an authorization scheme word, if there is one."""
-    span = _span(text, _skip_spaces(text, after))
+    span = _span(text, _skip_gap(text, after))
     if span is None:
         return None
     if _bare(text[span[0]:span[1]]) in PROSE_WORDS:
@@ -1309,9 +1358,12 @@ def _scheme_value(text: str, after: int) -> Optional[Tuple[int, int]]:
     return span
 
 
-def _bound_value(text: str, start: int) -> Optional[Tuple[int, int]]:
+def _bound_value(
+    text: str, start: int, explicit: bool = False
+) -> Optional[Tuple[int, int]]:
     """The value a joiner at ``start`` binds, past an authorization scheme."""
-    span = _span(text, _skip_spaces(text, start))
+    position = _skip_gap(text, start)
+    span = _explicit_span(text, position) if explicit else _span(text, position)
     if span is None:
         return None
     if _bare(text[span[0]:span[1]]) in AUTH_SCHEMES:
@@ -1345,11 +1397,11 @@ def _quoted_binding(text: str, after: int) -> Optional[Tuple[int, int]]:
     A quoted label binds its value through a separator or as a quoted run next
     to it; a word that merely follows the quoted label mentions it instead.
     """
-    position = _skip_spaces(text, after)
+    position = _skip_gap(text, after)
     if position >= len(text):
         return None
     if text[position] in "=:":
-        return _bound_value(text, _separator_end(text, position))
+        return _bound_value(text, _separator_end(text, position), True)
     if text[position] in _QUOTE_PAIRS:
         return _span(text, position)
     return None
@@ -1368,10 +1420,10 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
                 return _quoted_binding(text, quoted)
             return _span(text, label_end)
         if character in "=:":
-            return _bound_value(text, _separator_end(text, label_end))
-        if character not in _SPACES:
+            return _bound_value(text, _separator_end(text, label_end), True)
+        if character not in _WHITESPACE:
             return None
-        after = _skip_spaces(text, label_end)
+        after = _skip_gap(text, label_end)
         if after >= len(text):
             return None
         if text[after] in "=:":
@@ -1393,9 +1445,9 @@ def _binding(text: str, start: int, label_end: int) -> Optional[Tuple[int, int]]
             continue
         if word in COPULAS:
             # ``the token is VALUE``: the copula stays, the word after decides.
-            position = _skip_spaces(text, following)
+            position = _skip_gap(text, following)
             if position < len(text) and text[position] in "=:":
-                return _bound_value(text, _separator_end(text, position))
+                return _bound_value(text, _separator_end(text, position), True)
             span = _bound_value(text, following)
             if span is None:
                 return None
