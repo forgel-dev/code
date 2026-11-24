@@ -81,6 +81,48 @@ FRENCH = "bonjour, quelle est la version du projet ?"
 SPANISH = "hola, \u00bfqu\u00e9 pasa con el proyecto?"
 RUSSIAN = "\u043f\u0440\u0438\u0432\u0435\u0442, \u0447\u0442\u043e \u043f\u043e \u0440\u0435\u043b\u0438\u0437\u0443?"
 
+# The sensitive explicit actions of the session, written as ordinary French and
+# Spanish sentences: another verb form, another word order and the same words
+# without diacritics are the same request.
+FRENCH_SENSITIVE = (
+    "cr\u00e9e un projet",
+    "cr\u00e9er un projet",
+    "je veux cr\u00e9er un projet",
+    "cree un projet",
+    "un nouveau projet",
+    "d\u00e9finir le mot de passe",
+    "d\u00e9finis le mot de passe",
+    "mettre \u00e0 jour la configuration",
+    "changer la configuration",
+    "d\u00e9finir le jeton d'acc\u00e8s",
+)
+SPANISH_SENSITIVE = (
+    "crear un proyecto",
+    "crea un proyecto",
+    "quiero crear un proyecto",
+    "un proyecto nuevo",
+    "definir la contrase\u00f1a",
+    "definir la contrasena",
+    "asignar la clave",
+    "cambiar la configuraci\u00f3n",
+    "cambiar la configuracion",
+    "modificar los par\u00e1metros",
+)
+
+# The audited phrases together with their low-variation forms.
+REFUSED = FRENCH_SENSITIVE + SPANISH_SENSITIVE
+
+ORDINARY = (
+    "bonjour, quelle est la version du projet ?",
+    "hola, \u00bfqu\u00e9 pasa con el proyecto?",
+    "merci, montre les t\u00e2ches",
+    "gracias, muestre las tareas",
+    "comment vas-tu ?",
+    "je voudrais voir les t\u00e2ches en cours",
+    "\u00bfc\u00f3mo est\u00e1s?",
+    "quiero ver las tareas",
+)
+
 ENGLISH_WORDING = ("project:", "tasks:", "release:", "session ended")
 FRENCH_WORDING = ("projet :", "t\u00e2ches :", "publication :", "session termin\u00e9e")
 SPANISH_WORDING = ("proyecto:", "tareas:", "publicaci\u00f3n:", "sesi\u00f3n terminada")
@@ -185,6 +227,80 @@ class DetectionTest(unittest.TestCase):
 
     def test_a_fresh_session_starts_in_english(self) -> None:
         self.assertEqual(interactive.language_of("123"), "en")
+
+    def test_diacritics_case_and_whitespace_carry_no_meaning(self) -> None:
+        self.assertEqual(
+            interactive._fold("  CR\u00c9E   un  Projet  "), "cree un projet"
+        )
+        self.assertEqual(
+            interactive._fold("cambiar la configuraci\u00f3n"),
+            "cambiar la configuracion",
+        )
+
+
+class SensitiveDetectionTest(unittest.TestCase):
+    """The sensitive explicit actions are refused in every accepted language."""
+
+    def test_french_phrasings_are_sensitive(self) -> None:
+        for phrase in FRENCH_SENSITIVE:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(interactive.resolve(phrase)["kind"], "sensitive")
+
+    def test_spanish_phrasings_are_sensitive(self) -> None:
+        for phrase in SPANISH_SENSITIVE:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(interactive.resolve(phrase)["kind"], "sensitive")
+
+    def test_english_and_russian_phrasings_keep_their_result(self) -> None:
+        for phrase in (
+            "adopt this repository",
+            "create a project",
+            "set the api key",
+            "change the settings",
+            "\u0441\u043e\u0437\u0434\u0430\u0439 \u043f\u0440\u043e\u0435\u043a\u0442",
+            "\u043f\u043e\u043c\u0435\u043d\u044f\u0439 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044e",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(interactive.resolve(phrase)["kind"], "sensitive")
+
+    def test_ordinary_french_and_spanish_stay_free_text(self) -> None:
+        for phrase in ORDINARY:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(interactive.resolve(phrase)["kind"], "say")
+
+
+class SensitiveRefusalTest(LocalizationCase):
+    def test_a_refused_request_is_answered_and_passes_nothing_onward(self) -> None:
+        refusals = tuple(interactive.MESSAGES["sensitive"].values())
+        for phrase in REFUSED:
+            with self.subTest(phrase=phrase):
+                self.log.unlink(missing_ok=True)
+                _, text = self.run_session([phrase])
+                self.assertTrue(any(value in text for value in refusals), text)
+                for call in self.calls():
+                    self.assertNotEqual(call[0], "say")
+                    self.assertNotEqual(call[0], "use")
+                    self.assertNotEqual(call[0], "task")
+                    self.assertNotIn(phrase, " ".join(call))
+
+    def test_a_french_refusal_reads_in_the_existing_style(self) -> None:
+        _, text = self.run_session(["cr\u00e9e un projet"])
+        reply = self.reply_of_first_message(text)
+        self.assertIn(interactive.MESSAGES["sensitive"]["fr"], reply)
+
+    def test_a_spanish_refusal_reads_in_the_existing_style(self) -> None:
+        _, text = self.run_session(["\u00bfpuedo crear un proyecto?"])
+        reply = self.reply_of_first_message(text)
+        self.assertIn(interactive.MESSAGES["sensitive"]["es"], reply)
+
+    def test_ordinary_french_and_spanish_reach_the_engine_unchanged(self) -> None:
+        self.env["SESSION_STUB_ECHO"] = "1"
+        for phrase in ORDINARY:
+            with self.subTest(phrase=phrase):
+                self.log.unlink(missing_ok=True)
+                _, text = self.run_session([phrase])
+                self.assertIn("echo: " + phrase, text)
+                self.assertIn(["say", "--text", phrase, "--json"], self.calls())
 
 
 class WordingSetTest(unittest.TestCase):

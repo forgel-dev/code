@@ -89,6 +89,108 @@ SENSITIVE_MARKERS = (
     "настройк",
 )
 
+# The same actions in French and in Spanish name the action with a verb and
+# the thing it acts on with a noun, in either order and in any ordinary
+# inflection. Detection needs one of each, so a sentence that only mentions a
+# project, a password or the configuration stays ordinary conversation. Every
+# word is compared folded: lower-cased, without diacritics, punctuation and
+# repeated whitespace, so a phrase written without diacritics is recognised as
+# well. A noun that English spells the same way is left out, because the
+# markers above already cover it.
+CREATE_STEMS = ("cree", "crea", "inici")
+CREATE_FORMS = (
+    "nouveau",
+    "nouvel",
+    "nouvelle",
+    "nouveaux",
+    "nouvelles",
+    "nuevo",
+    "nueva",
+    "nuevos",
+    "nuevas",
+)
+SET_STEMS = (
+    "defin",
+    "establec",
+    "asign",
+    "enregistr",
+    "saisi",
+    "etabli",
+    "affect",
+    "attribu",
+    "indiqu",
+    "introduc",
+    "ingres",
+    "pon",
+    "mett",
+)
+SET_FORMS = ("met", "mets")
+CHANGE_STEMS = ("chang", "modifi", "modific", "cambi", "actualiz", "mett")
+CHANGE_FORMS = ("mise", "mises")
+
+PROJECT_NOUNS = ("projet", "projets", "proyecto", "proyectos")
+CREDENTIAL_NOUNS = (
+    "mot de passe",
+    "mots de passe",
+    "motdepasse",
+    "motdepasses",
+    "contrasena",
+    "contrasenas",
+    "contrasenia",
+    "contrasenias",
+    "jeton",
+    "jetons",
+    "token",
+    "tokens",
+    "password",
+    "passwords",
+    "cle",
+    "cles",
+    "clef",
+    "clefs",
+    "clave",
+    "claves",
+    "identifiant",
+    "identifiants",
+    "secreto",
+    "secretos",
+    "credencial",
+    "credenciales",
+    "secret",
+    "secrets",
+)
+CONFIG_NOUNS = (
+    "configuration",
+    "configurations",
+    "configuracion",
+    "configuraciones",
+    "reglage",
+    "reglages",
+    "parametre",
+    "parametres",
+    "parametro",
+    "parametros",
+    "preferencia",
+    "preferencias",
+    "ajuste",
+    "ajustes",
+)
+
+# Which action asks for which object. Creating a project, setting a credential
+# and changing a configuration are the sensitive families; a credential may be
+# asked for with a creating, a setting or a changing verb.
+SENSITIVE_ACTIONS = (
+    ((CREATE_FORMS, CREATE_STEMS), PROJECT_NOUNS),
+    (
+        (
+            CREATE_FORMS + SET_FORMS + CHANGE_FORMS,
+            CREATE_STEMS + SET_STEMS + CHANGE_STEMS,
+        ),
+        CREDENTIAL_NOUNS,
+    ),
+    ((CHANGE_FORMS, CHANGE_STEMS), CONFIG_NOUNS),
+)
+
 # Which words ask for which action. One sentence may name only one action.
 ACTIONS = (
     (
@@ -1131,6 +1233,53 @@ def _alpha_runs(text: str) -> List[str]:
     return runs
 
 
+# The plain letter each accented letter of the Latin languages of the session
+# stands for, so a phrase written without diacritics compares equal to the same
+# phrase written with them.
+_FOLD_CHARACTERS = {
+    "à": "a", "á": "a", "â": "a", "ã": "a", "ä": "a", "å": "a",
+    "ā": "a", "ă": "a", "ą": "a",
+    "ç": "c", "ć": "c", "č": "c",
+    "è": "e", "é": "e", "ê": "e", "ë": "e", "ē": "e", "ė": "e",
+    "ę": "e", "ě": "e",
+    "ì": "i", "í": "i", "î": "i", "ï": "i", "ī": "i", "į": "i",
+    "ñ": "n", "ń": "n", "ň": "n",
+    "ò": "o", "ó": "o", "ô": "o", "õ": "o", "ö": "o", "ø": "o",
+    "ō": "o",
+    "ù": "u", "ú": "u", "û": "u", "ü": "u", "ū": "u", "ů": "u",
+    "ý": "y", "ÿ": "y",
+    "œ": "oe", "æ": "ae", "ß": "ss",
+    "ё": "е",
+}
+for _point in range(0x0300, 0x0370):
+    _FOLD_CHARACTERS[chr(_point)] = ""
+_FOLD_TABLE = str.maketrans(_FOLD_CHARACTERS)
+
+
+def _fold(text: str) -> str:
+    """The text lower-cased, without diacritics, its whitespace collapsed."""
+    return " ".join(text.lower().translate(_FOLD_TABLE).split())
+
+
+def _asks_for_sensitive_action(folded: str) -> bool:
+    """Whether a folded sentence asks for a sensitive action in French or Spanish.
+
+    The request needs the verb of the action and the object it acts on, in
+    either order; a sentence that names only one of them stays ordinary
+    conversation.
+    """
+    words = _alpha_runs(folded)
+    if not words:
+        return False
+    sequence = " " + " ".join(words) + " "
+    for (forms, stems), nouns in SENSITIVE_ACTIONS:
+        if not any(word in forms or word.startswith(stems) for word in words):
+            continue
+        if any((" " + noun + " ") in sequence for noun in nouns):
+            return True
+    return False
+
+
 def _elides(lowered: str) -> bool:
     """Whether the text carries an elision characteristic of French."""
     for index, character in enumerate(lowered):
@@ -1652,6 +1801,11 @@ def resolve(text: str) -> Dict[str, Any]:
     if any(marker in lowered for marker in SENSITIVE_MARKERS):
         return {"kind": "sensitive"}
 
+    # The French and Spanish phrasings of the same actions are compared folded:
+    # case, diacritics, punctuation and repeated whitespace carry no meaning.
+    if _asks_for_sensitive_action(_fold(stripped)):
+        return {"kind": "sensitive"}
+
     # A switch prefix may end the sentence, so the line is compared with a
     # trailing space: ``switch to`` still asks for a project key.
     padded = lowered + " "
@@ -1833,8 +1987,9 @@ class InteractiveSession:
 
     # -- output ---------------------------------------------------------
 
-    def write(self, text: str = "", end: str = "\n") -> None:
-        self.out.write(redact(text) + end)
+    def write(self, text: str = "", end: str = "\n", masked: bool = True) -> None:
+        """Show text to the owner, masking key material unless it is our own."""
+        self.out.write((redact(text) if masked else text) + end)
         self.out.flush()
 
     def project_line(self) -> str:
@@ -2029,7 +2184,9 @@ class InteractiveSession:
         if kind == "leave":
             return "leave"
         if kind == "sensitive":
-            self.write(_message("sensitive", self.lang))
+            # The refusal is the session's own wording, so it is shown as it is
+            # written; the masking pass is for text that may carry a secret.
+            self.write(_message("sensitive", self.lang), masked=False)
             return "continue"
         if kind == "clarify":
             self.write(_message(intent["reason"], self.lang))
