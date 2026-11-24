@@ -359,6 +359,36 @@ SECRET_WORDS = frozenset(
 # Russian inflects its labels, so a Russian label is recognised by its stem.
 SECRET_STEMS = ("парол", "секрет", "токен", "ключ")
 
+# French and Spanish write their labels in their own words. They are compared
+# without diacritics, so the accented and the unaccented spelling are one
+# label, and in the plural as well as in the singular.
+SECRET_WORDS_FOLDED = frozenset(
+    [
+        "cle",
+        "cles",
+        "clef",
+        "clefs",
+        "jeton",
+        "jetons",
+        "secret",
+        "secrets",
+        "clave",
+        "claves",
+        "contrasena",
+        "contrasenas",
+        "contrasenia",
+        "contrasenias",
+        "secreto",
+        "secretos",
+    ]
+)
+
+# A label may also be several words: French writes its password label that way.
+SECRET_PHRASES = (
+    ("mot", "de", "passe"),
+    ("mots", "de", "passe"),
+)
+
 # An authorization scheme word stays visible; the credential after it does not.
 AUTH_SCHEMES = frozenset(
     [
@@ -606,6 +636,119 @@ FUNCTION_WORDS = frozenset(
     ]
 )
 
+# The function words French and Spanish write in ordinary prose. A label
+# followed by one of them names the label instead of binding a value to it, so
+# a sentence such as ``la clé du projet`` stays readable.
+FRENCH_SPANISH_FUNCTION_WORDS = frozenset(
+    [
+        "al",
+        "algo",
+        "au",
+        "aux",
+        "avec",
+        "car",
+        "ce",
+        "ces",
+        "cet",
+        "cette",
+        "como",
+        "con",
+        "dans",
+        "de",
+        "del",
+        "des",
+        "du",
+        "el",
+        "elle",
+        "elles",
+        "ellos",
+        "en",
+        "es",
+        "esa",
+        "esas",
+        "ese",
+        "eso",
+        "esos",
+        "est",
+        "esta",
+        "estas",
+        "este",
+        "estos",
+        "et",
+        "fue",
+        "ha",
+        "han",
+        "hasta",
+        "il",
+        "ils",
+        "je",
+        "la",
+        "las",
+        "le",
+        "les",
+        "leur",
+        "lo",
+        "los",
+        "lui",
+        "ma",
+        "mais",
+        "mes",
+        "mi",
+        "mis",
+        "moi",
+        "mon",
+        "muy",
+        "más",
+        "ne",
+        "ni",
+        "nos",
+        "notre",
+        "nous",
+        "o",
+        "ou",
+        "où",
+        "par",
+        "para",
+        "pas",
+        "pero",
+        "por",
+        "pour",
+        "que",
+        "qui",
+        "sa",
+        "se",
+        "ser",
+        "ses",
+        "si",
+        "sin",
+        "sobre",
+        "son",
+        "sont",
+        "su",
+        "sur",
+        "sus",
+        "ta",
+        "te",
+        "tes",
+        "toi",
+        "ton",
+        "tu",
+        "tus",
+        "un",
+        "una",
+        "uno",
+        "unos",
+        "unas",
+        "vos",
+        "votre",
+        "vous",
+        "y",
+        "ya",
+        "yo",
+    ]
+)
+FUNCTION_WORDS = FUNCTION_WORDS | FRENCH_SPANISH_FUNCTION_WORDS
+
 # Ordinary verbs and nouns that narrate work: a label followed by one of them
 # reports on the label instead of binding a value to it.
 NARRATIVE_WORDS = frozenset(
@@ -704,6 +847,16 @@ NARRATIVE_WORDS = frozenset(
         "удален",
         "удалён",
         "установлен",
+        "oublie",
+        "oublié",
+        "oubliee",
+        "oubliée",
+        "oublies",
+        "oubliés",
+        "olvidado",
+        "olvidada",
+        "olvidados",
+        "olvidadas",
     ]
 )
 
@@ -1290,6 +1443,11 @@ def _fold(text: str) -> str:
     return " ".join(text.lower().translate(_FOLD_TABLE).split())
 
 
+def _plain(text: str) -> str:
+    """The text lower-cased and without diacritics, nothing else."""
+    return text.lower().translate(_FOLD_TABLE)
+
+
 def _asks_for_sensitive_action(folded: str) -> bool:
     """Whether a folded sentence asks for a sensitive action in French or Spanish.
 
@@ -1403,12 +1561,38 @@ def _segments(label: str) -> List[str]:
 def _secret_label(label: str) -> bool:
     """Whether a label word or compound name bears a secret."""
     lowered = label.lower()
-    if lowered in SECRET_WORDS:
+    if lowered in SECRET_WORDS or _plain(lowered) in SECRET_WORDS_FOLDED:
         return True
     for segment in _segments(lowered):
         if segment in SECRET_WORDS or segment.startswith(SECRET_STEMS):
             return True
+        if _plain(segment) in SECRET_WORDS_FOLDED:
+            return True
     return False
+
+
+def _phrase_end(text: str, start: int, end: int) -> Optional[int]:
+    """The end of a several-word secret label at ``start``, if one starts there.
+
+    The words of such a label may be separated by any amount of whitespace, so
+    a line break inside it does not make the label unrecognised.
+    """
+    first = _plain(text[start:end])
+    for phrase in SECRET_PHRASES:
+        if phrase[0] != first:
+            continue
+        position = end
+        matched = True
+        for word in phrase[1:]:
+            after = _skip_gap(text, position)
+            following = _label_end(text, after)
+            if following is None or _plain(text[after:following]) != word:
+                matched = False
+                break
+            position = following
+        if matched:
+            return position
+    return None
 
 
 def _skip_gap(text: str, start: int) -> int:
@@ -1738,7 +1922,12 @@ def redact(text: str) -> str:
     out: List[str] = []
     copied = 0
     for start, end in _labels(text):
-        if start < copied or not _secret_label(text[start:end]):
+        if start < copied:
+            continue
+        phrase = _phrase_end(text, start, end)
+        if phrase is not None:
+            end = phrase
+        elif not _secret_label(text[start:end]):
             continue
         span = _binding(text, start, end)
         if span is None:
