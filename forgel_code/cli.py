@@ -14,7 +14,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Sequence
 
-from . import __version__
+from . import __version__, version_report
 from .engine import DEFAULT_TIMEOUT, Engine, EngineError
 from .render import render_human
 from .session import Session
@@ -353,6 +353,34 @@ def _json_requested(raw: Sequence[str]) -> bool:
     return "--json" in raw
 
 
+def version_requested(raw: Sequence[str]) -> bool:
+    """Whether the caller asked for the version rather than for a command.
+
+    Only the words before the command decide: a ``--version`` inside a
+    command's own arguments belongs to that command and is never read here.
+    """
+    for argument in raw:
+        if argument in COMMANDS or argument == "--":
+            return False
+        if argument == "--version":
+            return True
+    return False
+
+
+def report_version(as_json: bool) -> int:
+    """Print the client's version, and with ``--json`` its engine floor too.
+
+    Both values are the client's own declaration, so the report is produced
+    without discovering, configuring or running an engine and without the
+    network. The human-readable line stays what it has always been.
+    """
+    if as_json:
+        print(json.dumps(version_report(), ensure_ascii=False))
+    else:
+        print("forgel-code %s" % __version__)
+    return 0
+
+
 def run_interactive() -> int:
     """Open the interactive session the client falls into with no arguments."""
     from .interactive import run
@@ -365,6 +393,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not raw:
         # No arguments is the interactive session, never a usage error.
         return run_interactive()
+    if version_requested(raw):
+        # The report is the client's own declaration: no engine is discovered or
+        # run, and no session, timeout or project takes part in it.
+        return report_version(_json_requested(raw))
 
     parser = build_parser()
     try:
