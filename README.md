@@ -11,9 +11,11 @@ project files and never runs checks itself.
 
 ## Install
 
-Forgel Code installs with one command. It needs Python 3.9 or newer with the
-`pip` module it ships. The same run also brings the `forgel` engine the client
-needs onto the machine, so one command leaves a working client-and-engine pair.
+Forgel Code installs with one command, and that command installs the `forgel`
+engine the client runs as well: one action leaves a working client-and-engine
+pair, with no second program to find, install or version-match. Running it
+exactly as shown needs no option, flag or follow-up step. It needs Python 3.9 or
+newer with the `pip` module it ships.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh | sh
@@ -79,6 +81,52 @@ fails. The failure message names the required minimum, the engine version found
 or offered, and what you can do next. A successful run states the engine version
 in place and how it was obtained: installed, kept or replaced.
 
+Running the same documented install again therefore replaces the client and
+compares the engine already in place with the engine that run would provide: the
+engine is installed when it is missing or strictly older, and an equal or newer
+engine is left exactly as it is, so an existing newer engine is never taken
+backwards.
+
+### Engine version
+
+The one minimum supported engine version is 0.1.0: the client accepts an engine
+at that version or newer and refuses engine-backed work when the engine it finds
+is older. A reader whose engine is missing or too old sees a message that says
+what is wrong and what to run instead of a bare not-found error:
+
+- **No engine.** The client reports that it requires the `forgel` engine, at
+  the minimum supported engine version of 0.1.0 or newer, and that it could not
+  be started. It points at the install that supplies one; the combined install
+  above brings an engine at that minimum or newer.
+- **Too old.** The client reports that it requires engine version 0.1.0 or
+  newer while the engine it found reports its own lower version, so the version
+  found and the 0.1.0 minimum are both named, and it points at the upgrade:
+  running the combined install above again.
+
+Asking the client about itself does not need an engine. Its version output,
+`forgel-code --version`, and its machine-readable form,
+`forgel-code --version --json`, which carries the client's version next to the
+minimum supported engine version, answer with no engine installed and without
+contacting the network; so does the diagnostic answer, `forgel-code --help`.
+Every command that needs the engine fails with the message above while no engine
+at 0.1.0 or newer is present.
+
+### The engine on its own
+
+The engine installs on its own through its own installer, `forgel-install` —
+one action, and the path for a reader who wants the engine without the client or
+who already has the client:
+
+```sh
+forgel-install --source https://github.com/forgel-dev/forgel --install <version>
+```
+
+That installs the engine version named in `<version>`, which is one at the
+minimum supported engine version, 0.1.0, or newer. `forgel-install --source
+<source> --available-version` prints which engine version a source provides
+without installing anything. The source and the installer command are
+configuration, described under **Engine source** below.
+
 ### Engine source
 
 The engine source the run resolves against is configuration with a default, and
@@ -100,9 +148,11 @@ curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh |
 ```
 
 installs the client alone. That route neither queries nor installs nor changes
-any engine, and an engine present beforehand stays exactly as it was. The
-engine is then yours to supply, at the client's declared minimum supported
-engine version or newer, before you use the client.
+any engine, and an engine present beforehand stays exactly as it was. It is the
+route for a reader whose engine is already in place and satisfying the client's
+declared minimum supported engine version of 0.1.0 or newer; otherwise supply an
+engine that satisfies it before the engine-backed commands work, and the
+engine's own install above supplies one.
 
 The client has no dependencies and builds through the small in-tree PEP 517
 backend (`_build_backend.py`), so the installer never needs a package index.
