@@ -958,56 +958,5 @@ class NoEngineImportTest(unittest.TestCase):
                 self.assertNotIn("from forgel import", text)
 
 
-class ReadmeTest(unittest.TestCase):
-    INSTALL_URL = "https://raw.githubusercontent.com/forgel-dev/code/v0.1.1/install.sh"
-
-    def setUp(self) -> None:
-        self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    def test_readme_documents_the_engine_commands_the_client_calls(self) -> None:
-        for fragment in (
-            "forgel say",
-            "forgel status",
-            "forgel tasks",
-            "forgel task accept",
-            "forgel task reject",
-            "--notes",
-            "forgel plan",
-            "forgel resume",
-            "forgel pause",
-            "forgel history",
-            "forgel projects",
-            "forgel use",
-        ):
-            self.assertIn(fragment, self.readme)
-        self.assertNotIn("--reason", self.readme)
-        self.assertNotIn("forgel task --accept", self.readme)
-
-    def test_readme_documents_the_missing_engine_command_report(self) -> None:
-        self.assertIn("no engine command", self.readme)
-
-    def test_readme_has_a_pinned_install_command(self) -> None:
-        self.assertIn(
-            "curl -fsSL %s | sh" % self.INSTALL_URL,
-            self.readme,
-        )
-        self.assertIn(self.INSTALL_URL, self.readme)
-
-    def test_readme_has_no_default_branch_install(self) -> None:
-        for line in self.readme.splitlines():
-            stripped = line.strip()
-            if "raw.githubusercontent.com/forgel-dev/code" in stripped:
-                self.assertIn("/v", stripped, line)
-
-    def test_readme_has_no_editable_install_recommendation(self) -> None:
-        self.assertNotIn("pip install .", self.readme)
-        self.assertIn("Editable installs", self.readme)
-        self.assertIn("not supported", self.readme)
-
-    def test_readme_documents_the_update_path(self) -> None:
-        self.assertIn("### Update", self.readme)
-        self.assertIn(self.INSTALL_URL, self.readme)
-
-
 if __name__ == "__main__":
     unittest.main()

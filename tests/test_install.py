@@ -70,6 +70,10 @@ IGNORED = shutil.ignore_patterns(
 TIMEOUT = 60
 SCRIPT_NAMES = ("forgel-code", "forgel-code.exe", "forgel-code-script.py")
 
+# The deterministic stand-in for the engine's own installer, which answers the
+# available version and installs a requested one.
+STUB_ENGINE_INSTALL = Path(__file__).resolve().parent / "stub_engine_install.py"
+
 # The prefix of the private directory the bounded check creates.
 CHECK_PREFIX = "forgel-code-check"
 
@@ -140,11 +144,22 @@ def _source_version() -> str:
     raise AssertionError("forgel_code/__init__.py declares no __version__")
 
 
+def _declared_minimum() -> str:
+    """The single source of the minimum engine version: ``forgel_code``."""
+    text = (ROOT / "forgel_code" / "__init__.py").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("MIN_ENGINE_VERSION"):
+            return line.split("=", 1)[1].strip().strip("\"'")
+    raise AssertionError("forgel_code/__init__.py declares no MIN_ENGINE_VERSION")
+
+
 def _clean_environment() -> dict:
     """The developer's environment without anything that could redirect us."""
     env = dict(os.environ)
     for name in (
         "FORGEL_ENGINE",
+        "FORGEL_ENGINE_INSTALLER",
+        "FORGEL_ENGINE_SOURCE",
         "FORGEL_CODE_HOME",
         "FORGEL_CODE_BIN",
         "FORGEL_CODE_SOURCE",
@@ -155,6 +170,12 @@ def _clean_environment() -> dict:
         "FORGEL_CODE_NO_MODIFY_PATH",
         "FORGEL_CODE_NO_PROFILE_EDIT",
         "FORGEL_CODE_TIMEOUT",
+        "FORGEL_STUB_ENGINE_AVAILABLE",
+        "FORGEL_STUB_ENGINE_AVAILABLE_EXIT",
+        "FORGEL_STUB_ENGINE_INSTALL_EXIT",
+        "FORGEL_STUB_ENGINE_LOG",
+        "FORGEL_STUB_ENGINE_SOURCES",
+        "FORGEL_STUB_ENGINE_TARGET",
         "FORGEL_STUB_MODE",
         "FORGEL_STUB_USER_SHELL",
         "PYTHONPATH",
@@ -227,8 +248,38 @@ def _installer_environment(home: Path, **extra) -> dict:
     # The interpreter that owns pip here, so the test does not depend on which
     # python3 happens to be first on the developer's PATH.
     env["FORGEL_CODE_PYTHON"] = _install_python()
+    # The engine side of the run, so the combined installation is exercised by
+    # every scenario that installs the client.
+    env.update(_engine_environment(home))
     env.update(extra)
     return env
+
+
+def _engine_environment(home: Path) -> dict:
+    """The engine a scenario starts with: the stub installer and its target.
+
+    The fake engine lives under the scenario's HOME, outside the directories
+    the installer owns, and the stand-in for the engine's own installer records
+    what it was asked. The stub answers the client's declared minimum engine
+    version unless a scenario says otherwise.
+    """
+    directory = home / "engine"
+    directory.mkdir(parents=True, exist_ok=True)
+    installer = directory / "forgel-install"
+    installer.write_text(
+        "#!/bin/sh\nexec %s %s \"$@\"\n"
+        % (_shell_quote(sys.executable), _shell_quote(STUB_ENGINE_INSTALL)),
+        encoding="utf-8",
+    )
+    installer.chmod(0o755)
+    binary = directory / "bin" / "forgel"
+    return {
+        "FORGEL_ENGINE": str(binary),
+        "FORGEL_ENGINE_INSTALLER": str(installer),
+        "FORGEL_STUB_ENGINE_AVAILABLE": _declared_minimum(),
+        "FORGEL_STUB_ENGINE_LOG": str(directory / "argv.log"),
+        "FORGEL_STUB_ENGINE_TARGET": str(binary),
+    }
 
 
 def _write_dscl_stub(directory: Path) -> Path:
@@ -381,6 +432,8 @@ class _Installation:
         self.bin_dir = self.base / "bin"
         self.profile = self.home / ".profile"
         self.launcher = self.bin_dir / "forgel-code"
+        # The engine a scenario starts with, and the one it ends with.
+        self.engine = self.home / "engine" / "bin" / "forgel"
         self.env = _installer_environment(
             self.home,
             FORGEL_CODE_SOURCE=str(_shared_source()),
@@ -420,6 +473,7 @@ class InstallerCase(unittest.TestCase):
         self.bin_dir = installation.bin_dir
         self.profile = installation.profile
         self.launcher = installation.launcher
+        self.engine = installation.engine
         self.env = installation.env
 
     def plain_install(self) -> subprocess.CompletedProcess:

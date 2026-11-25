@@ -24,6 +24,20 @@
 # ``forgel-code`` resolves to the launcher it just wrote. Re-running replaces
 # the installation; running with ``--uninstall`` removes it again.
 #
+# Installing the client alone is not enough to use it, so the same run also
+# makes sure an engine the client supports is in place. It asks the engine's own
+# installer which version the configured engine source provides, without
+# installing anything, and reads the version of an engine that is already
+# present. Only then does it decide: a present engine that satisfies the
+# client's minimum is kept when the available version is not strictly newer, a
+# strictly newer available engine replaces it, and an absent engine is obtained
+# when the available version is supported. Anything else ends the run as a
+# failure that names the required minimum, the version found or offered and the
+# action the user can take. A successful run always states the engine version in
+# place and how it was obtained. ``--client-only`` installs the client alone and
+# touches no engine. Reading a version report, and installing a version, are the
+# engine installer's own jobs; this script only decides and delegates.
+#
 # Environment variables:
 #   FORGEL_CODE_HOME            install prefix (default: $HOME/.local/share/forgel-code)
 #   FORGEL_CODE_BIN             launcher directory (default: $HOME/.local/bin)
@@ -35,6 +49,10 @@
 #   FORGEL_CODE_NO_MODIFY_PATH  set to leave the shell profile untouched
 #   FORGEL_CODE_NO_PROFILE_EDIT the same opt-out under its older name
 #   FORGEL_CODE_TIMEOUT         seconds the fresh-shell check may take (default: 10)
+#   FORGEL_ENGINE_SOURCE        engine source the engine installer resolves against
+#                               (default: https://github.com/forgel-dev/forgel)
+#   FORGEL_ENGINE_INSTALLER     the engine's own installer (default: forgel-install on PATH)
+#   FORGEL_ENGINE               engine binary whose version is read (default: forgel on PATH)
 #
 # The script is POSIX ``sh`` and safe to pipe into: it never reads stdin.
 
@@ -57,6 +75,18 @@ BIN_DIR=${FORGEL_CODE_BIN:-$HOME_DIR/.local/bin}
 LAUNCHER=$BIN_DIR/forgel-code
 TAG=${FORGEL_CODE_TAG:-v0.2.0}
 REPOSITORY=${FORGEL_CODE_REPOSITORY:-https://github.com/forgel-dev/code}
+
+# The engine side of the installation: the source the run asks about, the
+# engine's own installer that answers and installs, and the binary whose version
+# report says what is already in place.
+ENGINE_SOURCE=${FORGEL_ENGINE_SOURCE:-https://github.com/forgel-dev/forgel}
+ENGINE_INSTALLER=${FORGEL_ENGINE_INSTALLER:-forgel-install}
+
+# What the engine part of the run learned, filled in before anything is decided.
+# A failure report quotes whichever of them are known.
+ENGINE_MINIMUM=
+ENGINE_PRESENT=
+ENGINE_AVAILABLE=
 
 # What a fresh shell reports back: its own PATH and the path it resolves
 # ``forgel-code`` to. The prefixes keep the answer readable next to anything a
@@ -110,18 +140,65 @@ CHECK_CLEANED=
 CHECK_STATUS=0
 CHECK_OUTPUT=
 
+# How two engine versions are ordered. The ordering is numeric component by
+# component, ignores one leading version marker and trailing zero components, so
+# ``v0.2.0``, ``0.2`` and ``0.2.0.0`` are the same version. A version with a
+# component that is not a number cannot be ordered at all: the helper exits with
+# status 2 and the caller treats that version as not satisfying a minimum.
+# ``ge`` and ``gt`` compare; both exit 0 only for a true answer.
+VERSION_HELPER='
+import sys
+
+def parse(text):
+    text = text.strip()
+    if text[:1] in ("v", "V"):
+        text = text[1:]
+    if not text:
+        return None
+    numbers = []
+    for part in text.split("."):
+        if not part.isdigit() or not part.isascii():
+            return None
+        numbers.append(int(part))
+    while len(numbers) > 1 and numbers[-1] == 0:
+        numbers.pop()
+    return numbers
+
+if len(sys.argv) < 4:
+    sys.exit(2)
+operator, left, right = sys.argv[1], sys.argv[2], sys.argv[3]
+first = parse(left)
+second = parse(right)
+if first is None or second is None:
+    sys.exit(2)
+width = max(len(first), len(second))
+first = first + [0] * (width - len(first))
+second = second + [0] * (width - len(second))
+if operator == "ge":
+    sys.exit(0 if first >= second else 1)
+if operator == "gt":
+    sys.exit(0 if first > second else 1)
+sys.exit(2)
+'
+
 usage() {
     cat <<'USAGE'
-Usage: install.sh [--uninstall] [--help]
+Usage: install.sh [--client-only] [--uninstall] [--help]
 
 Installs the Forgel Code client into ${FORGEL_CODE_HOME:-$HOME/.local/share/forgel-code}
 and its launcher into ${FORGEL_CODE_BIN:-$HOME/.local/bin}, adding that directory
 to PATH with one marked block in the profile the login shell reads. The result
 is checked in a freshly started login interactive shell under a bounded time
-limit.
+limit. The same run also makes sure an engine the client supports is in place,
+and states which engine version it ended with and how it was obtained.
 
-  --uninstall   remove the installation, the launcher and the PATH block
-  --help        show this text
+  --client-only  install the client alone and leave any engine untouched
+  --uninstall    remove the installation, the launcher and the PATH block
+  --help         show this text
+
+The engine source is ${FORGEL_ENGINE_SOURCE:-https://github.com/forgel-dev/forgel}
+and the engine's own installer is ${FORGEL_ENGINE_INSTALLER:-forgel-install} on PATH;
+set FORGEL_ENGINE_SOURCE or FORGEL_ENGINE_INSTALLER to point the run elsewhere.
 
 Set FORGEL_CODE_NO_MODIFY_PATH=1 to leave the shell profile untouched; the
 script then prints the exact export PATH=... line to add yourself.
@@ -944,6 +1021,135 @@ install_client() {
     add_path
 }
 
+# Order two versions with the project's release ordering.
+version_compare() {
+    "$PYTHON" -c "$VERSION_HELPER" "$1" "$2" "$3" 2>/dev/null
+}
+
+# The minimum supported engine version, exactly as the installed client declares
+# it: the declaration is the single source, so the installation and the client
+# can never disagree about it.
+engine_minimum() {
+    PYTHONPATH="$PREFIX" "$PYTHON" -c 'import forgel_code; print(forgel_code.MIN_ENGINE_VERSION)' 2>/dev/null
+}
+
+# The engine binary whose report names the version in place: the one the client
+# itself would run, so both read the same engine.
+engine_binary() {
+    if [ -n "${FORGEL_ENGINE:-}" ]; then
+        printf '%s\n' "$FORGEL_ENGINE"
+        return 0
+    fi
+    found=$(command -v forgel 2>/dev/null) || found=
+    if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        return 0
+    fi
+    return 1
+}
+
+# The version the engine in place reports, or nothing when no engine is present
+# or its report cannot be read. An engine that cannot report a version is
+# treated exactly like a missing one.
+engine_present_version() {
+    binary=$(engine_binary) || return 1
+    report=$("$binary" --version --json 2>/dev/null) || return 1
+    "$PYTHON" -c '
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+engine = payload.get("engine") if isinstance(payload, dict) else None
+version = engine.get("version") if isinstance(engine, dict) else None
+if not isinstance(version, str) or not version.strip():
+    sys.exit(1)
+print(version.strip())
+' "$report" 2>/dev/null
+}
+
+# The version the configured engine source provides, as the engine's own
+# installer reports it. Nothing is installed by this call.
+engine_available_version() {
+    answer=$("$ENGINE_INSTALLER" --source "$ENGINE_SOURCE" --available-version 2>/dev/null) || return 1
+    version=$(printf '%s\n' "$answer" | awk 'NF { print $1; exit }')
+    if [ -z "$version" ]; then
+        return 1
+    fi
+    printf '%s\n' "$version"
+}
+
+# Install the requested engine version through the engine's own installer.
+engine_install() {
+    "$ENGINE_INSTALLER" --source "$ENGINE_SOURCE" --install "$1"
+}
+
+# The one failure report of the engine part of the run: what went wrong, the
+# required minimum, what was found, and the action that supplies a satisfying
+# engine.
+engine_failure() {
+    echo "install.sh: $1" >&2
+    echo "install.sh: required minimum engine version: $ENGINE_MINIMUM" >&2
+    if [ -n "$ENGINE_PRESENT" ]; then
+        echo "install.sh: engine found: $ENGINE_PRESENT" >&2
+    fi
+    if [ -n "$ENGINE_AVAILABLE" ]; then
+        echo "install.sh: available engine version: $ENGINE_AVAILABLE" >&2
+    fi
+    echo "install.sh: engine source: $ENGINE_SOURCE" >&2
+    echo "install.sh: engine installer: $ENGINE_INSTALLER" >&2
+    echo "install.sh: what you can do: install the Forgel engine $ENGINE_MINIMUM or newer from $ENGINE_SOURCE with the engine's own installer, point FORGEL_ENGINE_SOURCE and FORGEL_ENGINE_INSTALLER at a source that provides it, or install only the client with 'install.sh --client-only'." >&2
+    return 1
+}
+
+# Decide about the engine and reach a supported end state, or fail and say why.
+# The available version is read first, without installing anything, and the
+# present engine is never touched until that decision is made. A present engine
+# that already satisfies the minimum is kept whenever the offered version is not
+# strictly newer: nothing that is not newer is ever installed over it.
+install_engine() {
+    if ! ENGINE_MINIMUM=$(engine_minimum) || [ -z "$ENGINE_MINIMUM" ]; then
+        echo "install.sh: the installed client declares no minimum supported engine version" >&2
+        return 1
+    fi
+    ENGINE_PRESENT=
+    if present=$(engine_present_version); then
+        ENGINE_PRESENT=$present
+    fi
+    if ! ENGINE_AVAILABLE=$(engine_available_version); then
+        ENGINE_AVAILABLE=
+        engine_failure "cannot determine the engine version that $ENGINE_SOURCE provides"
+        return 1
+    fi
+    present_ok=0
+    if [ -n "$ENGINE_PRESENT" ] && version_compare ge "$ENGINE_PRESENT" "$ENGINE_MINIMUM"; then
+        present_ok=1
+    fi
+    if [ "$present_ok" = "1" ] && ! version_compare gt "$ENGINE_AVAILABLE" "$ENGINE_PRESENT"; then
+        echo "Engine: forgel $ENGINE_PRESENT kept; the available $ENGINE_AVAILABLE is not newer."
+        return 0
+    fi
+    if ! version_compare ge "$ENGINE_AVAILABLE" "$ENGINE_MINIMUM"; then
+        engine_failure "the available engine $ENGINE_AVAILABLE does not satisfy the client's minimum supported engine version"
+        return 1
+    fi
+    if ! engine_install "$ENGINE_AVAILABLE"; then
+        engine_failure "installing Forgel engine $ENGINE_AVAILABLE from $ENGINE_SOURCE failed"
+        return 1
+    fi
+    if [ -n "$ENGINE_PRESENT" ]; then
+        echo "Engine: forgel $ENGINE_AVAILABLE replaced $ENGINE_PRESENT from $ENGINE_SOURCE."
+    else
+        echo "Engine: forgel $ENGINE_AVAILABLE installed from $ENGINE_SOURCE; no engine was present."
+    fi
+    return 0
+}
+
+report_client_only() {
+    echo "Engine: left untouched; --client-only was used, so no engine was queried or changed."
+    return 0
+}
+
 # Clean the marked block out of one profile file, reporting it only when the
 # file really carried one.
 uninstall_profile() {
@@ -990,6 +1196,9 @@ uninstall() {
             status=1
         fi
     fi
+    # Removing the client installs nothing and leaves any engine in place: the
+    # engine's lifecycle belongs to the engine.
+    echo "Engine: left in place; removing the client does not touch any engine."
     if [ "$status" = "0" ]; then
         echo "Forgel Code is uninstalled."
     fi
@@ -999,7 +1208,17 @@ uninstall() {
 main() {
     case ${1:-} in
         '')
-            install_client
+            install_client || return 1
+            install_engine
+            ;;
+        --client-only)
+            if [ "$#" -gt 1 ]; then
+                echo "install.sh: --client-only takes no further argument" >&2
+                usage >&2
+                return 2
+            fi
+            install_client || return 1
+            report_client_only
             ;;
         --uninstall)
             uninstall

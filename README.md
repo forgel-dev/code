@@ -12,7 +12,8 @@ project files and never runs checks itself.
 ## Install
 
 Forgel Code installs with one command. It needs Python 3.9 or newer with the
-`pip` module it ships, and the `forgel` engine on `PATH`.
+`pip` module it ships. The same run also brings the `forgel` engine the client
+needs onto the machine, so one command leaves a working client-and-engine pair.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh | sh
@@ -54,6 +55,55 @@ so a profile your login shell never reads is never reported as active.
 Re-running keeps exactly one marked block and leaves the rest of the file as it
 was.
 
+### The engine
+
+The same run settles the engine the client runs. It first learns which engine
+version the configured engine source offers, without installing anything, and
+which version of an engine is already in place. Then it decides:
+
+| Engine in place | Offered version | Result |
+| --- | --- | --- |
+| none | at or above the declared minimum | that version is installed |
+| at or above the minimum, and the offered version is not strictly newer | any | the engine is kept and nothing about it is changed |
+| below the offered version | supported and strictly newer | the strictly newer version replaces the engine in place |
+
+A version equal to, or older than, the one in place is never installed. The
+engine versions are ordered numerically, component by component; one leading
+version prefix and trailing zero components do not change the comparison, and a
+version that cannot be ordered never counts as supported. The engine left in
+place always satisfies the client's declared minimum supported engine version;
+when that cannot be reached the run ends as a failure instead of reporting the
+pair as installed: the offered version is below the minimum and no suitable
+engine is present, the engine source cannot be read, or installing the engine
+fails. The failure message names the required minimum, the engine version found
+or offered, and what you can do next. A successful run states the engine version
+in place and how it was obtained: installed, kept or replaced.
+
+### Engine source
+
+The engine source the run resolves against is configuration with a default, and
+either variable can point it elsewhere.
+
+| Variable | Effect |
+| --- | --- |
+| `FORGEL_ENGINE_SOURCE` | engine source the run asks about and installs from (default `https://github.com/forgel-dev/forgel`) |
+| `FORGEL_ENGINE_INSTALLER` | the engine's own installer the run asks and delegates to (default `forgel-install` on `PATH`) |
+
+```sh
+FORGEL_ENGINE_SOURCE=https://example.test/forgel-mirror sh install.sh
+```
+
+### Client only
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh | sh -s -- --client-only
+```
+
+installs the client alone. That route neither queries nor installs nor changes
+any engine, and an engine present beforehand stays exactly as it was. The
+engine is then yours to supply, at the client's declared minimum supported
+engine version or newer, before you use the client.
+
 The client has no dependencies and builds through the small in-tree PEP 517
 backend (`_build_backend.py`), so the installer never needs a package index.
 Editable installs are not supported: the backend implements only the
@@ -71,7 +121,7 @@ Editable installs are not supported: the backend implements only the
 
 With `FORGEL_CODE_NO_MODIFY_PATH=1` no profile file is opened for writing, no
 fresh-shell check runs, the installer prints the exact line to add yourself and
-exits with code 0.
+exits with code 0. The engine part of the run still happens.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -81,9 +131,9 @@ export PATH="$HOME/.local/bin:$PATH"
 FORGEL_CODE_SOURCE=/path/to/code sh install.sh
 ```
 
-The `forgel` engine must be available on `PATH`; use `--engine PATH` or
-`$FORGEL_ENGINE` to point at a specific binary. `forgel-code --version` prints
-the installed version.
+The client runs the `forgel` engine the default installation leaves on `PATH`;
+use `--engine PATH` or `$FORGEL_ENGINE` to point the client at a specific
+binary. `forgel-code --version` prints the installed version.
 
 ### Update
 
@@ -97,7 +147,7 @@ curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh |
 curl -fsSL https://raw.githubusercontent.com/forgel-dev/code/v0.2.0/install.sh | sh -s -- --uninstall
 ```
 
-The uninstall removes the installation prefix, the `forgel-code` launcher and
+The uninstall removes the client installation, the `forgel-code` launcher and
 the marked `PATH` block from every profile file this installer can have written:
 `~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bash_login`,
 `~/.profile` and `~/.bashrc`. When `FORGEL_CODE_PROFILE` names another file, the
@@ -105,7 +155,8 @@ same run also removes the marked block from that exact file, so a block left
 behind by an install that edited a custom profile — including an install that
 wrote the block and then failed its fresh-shell check — does not survive. A file
 that is missing or carries no marker is left alone, no file is created, and the
-rest of each edited file is left unchanged.
+rest of each edited file is left unchanged. The uninstall installs nothing and
+leaves any engine in place.
 
 Windows is not the main installation method; the fallback there is `python -m pip install --user` of the pinned revision.
 
@@ -258,7 +309,7 @@ Installing the client with its `test` extra brings the pytest the wheel
 declares, so a pinned revision can run the same suite too:
 
 ```sh
-python3 -m pip install "https://github.com/forgel-dev/code/archive/refs/tags/v0.1.1.tar.gz[test]"
+python3 -m pip install "https://github.com/forgel-dev/code/archive/refs/tags/v0.2.0.tar.gz[test]"
 python -m pytest -q
 ```
 
