@@ -36,6 +36,14 @@ FAKE_ENGINE = textwrap.dedent(
         with open(log, "w", encoding="utf-8") as handle:
             json.dump(argv, handle)
 
+    if argv[:1] == ["version"]:
+        sys.stdout.write(
+            json.dumps({"ok": True, "engine": {"name": "fake", "version": "1.0.0"}})
+            + chr(10)
+        )
+        sys.stdout.flush()
+        raise SystemExit(0)
+
     sleep = os.environ.get("FAKE_ENGINE_SLEEP")
     if sleep:
         time.sleep(float(sleep))

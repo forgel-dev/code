@@ -28,7 +28,16 @@ COMMANDS = {
     "accept",
     "rework",
 }
-ENGINE = {"name": "forgel-stub", "version": "0.0.0"}
+
+
+def engine():
+    return {
+        "name": "forgel-stub",
+        "version": os.environ.get("FORGEL_STUB_VERSION", "0.1.0"),
+    }
+
+
+ENGINE = engine()
 
 
 def emit(obj, code=0):
@@ -53,6 +62,8 @@ def main(argv):
     sleep = os.environ.get("FORGEL_STUB_SLEEP")
     if sleep:
         time.sleep(float(sleep))
+    if argv and argv[0] in ("--version", "version"):
+        emit({"ok": True, "engine": ENGINE})
     canned = os.environ.get("FORGEL_STUB_STDOUT")
     if canned is not None:
         sys.stdout.write(canned)
@@ -60,8 +71,6 @@ def main(argv):
         raise SystemExit(int(os.environ.get("FORGEL_STUB_EXIT", "0")))
     if not argv or argv == ["--help"]:
         emit({"ok": True, "engine": ENGINE, "commands": sorted(COMMANDS)})
-    if argv[0] in ("--version", "version"):
-        emit({"ok": True, "engine": ENGINE})
     cmd = argv[0]
     if cmd not in COMMANDS:
         msg = "unsupported command: " + cmd

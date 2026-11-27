@@ -14,7 +14,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Sequence
 
-from . import __version__, version_report
+from . import __version__, compat, version_report
 from .engine import DEFAULT_TIMEOUT, Engine, EngineError
 from .render import render_human
 from .session import Session
@@ -432,6 +432,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # engine, never the client's local session label.
     reported_project = engine_project
     try:
+        # An engine older than the client's floor, or one that cannot say which
+        # version it runs, is refused before the requested work is attempted.
+        compat.confirm(engine)
         result = engine.run(arguments)
         if command == "task":
             try:

@@ -19,7 +19,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional, Sequence, TextIO, Tuple
 
-from . import commands
+from . import commands, compat
 from .engine import DEFAULT_TIMEOUT, Engine, EngineError
 from .render import render_human
 from .session import Session
@@ -2697,8 +2697,16 @@ def run(
     inp: Optional[TextIO] = None,
 ) -> int:
     """Open the interactive session and keep it open until the owner leaves."""
+    engine = engine if engine is not None else default_engine()
+    # The same confirmation a one-shot command performs: no prompt opens on an
+    # engine that is missing, older than the minimum, or unconfirmable.
+    try:
+        compat.confirm(engine)
+    except EngineError as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.returncode or 1
     session = InteractiveSession(
-        engine if engine is not None else default_engine(),
+        engine,
         store if store is not None else Session(),
         out if out is not None else sys.stdout,
         inp if inp is not None else sys.stdin,

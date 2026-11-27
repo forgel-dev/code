@@ -58,6 +58,17 @@ STUB_ENGINE = textwrap.dedent(
         sys.exit(code)
 
 
+    if argv[:1] == ["version"]:
+        emit(
+            {
+                "ok": True,
+                "engine": {
+                    "name": "forgel-stub",
+                    "version": os.environ.get("FORGEL_STUB_VERSION", "0.9.0"),
+                },
+            }
+        )
+
     if mode == "sleep":
         time.sleep(float(os.environ.get("FORGEL_STUB_SLEEP", "10")))
         emit({"ok": True})

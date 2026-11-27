@@ -37,7 +37,9 @@ STUB_ENGINE = textwrap.dedent(
 
     payload = json.loads(os.environ["SESSION_STUB_PAYLOAD"])
     command = argv[0] if argv else ""
-    if command == "say":
+    if command == "version":
+        payload = {"ok": True, "engine": {"name": "forgel", "version": "0.1.1"}}
+    elif command == "say":
         payload = {"ok": True, "reply": "the agent answered"}
     elif command == "plan":
         payload = {
@@ -100,6 +102,7 @@ class InteractiveCase(unittest.TestCase):
         self.env["SESSION_STUB_PAYLOAD"] = json.dumps(STATE)
         self.env["SESSION_STUB_LOG"] = str(self.log)
         self.env["FORGEL_CODE_HOME"] = str(self.home / "session")
+        self.env["FORGEL_ENGINE"] = str(self.engine_path)
         self.env.pop("SESSION_STUB_REJECT_USE", None)
 
     def run_session(self, lines):
