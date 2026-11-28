@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import unittest
+from pathlib import Path
 
 from tests.test_install import (
     InstallerCase,
@@ -77,7 +79,7 @@ class EngineCase(InstallerCase):
         if not os.path.exists(self.env["FORGEL_ENGINE"]):
             return ""
         result = _run(
-            [self.env["FORGEL_ENGINE"], "--version", "--json"], self.base, self.env
+            [self.env["FORGEL_ENGINE"], "version", "--json"], self.base, self.env
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)["engine"]["version"]
@@ -130,6 +132,39 @@ class EngineKeptTest(EngineCase):
 
     def test_a_prefix_or_trailing_zeros_do_not_make_a_newer_version(self) -> None:
         self.assert_kept("v0.1.0.0", "0.1")
+
+    def test_a_supported_engine_answering_its_report_is_kept(self) -> None:
+        """The present version comes from the report the engine really answers."""
+        version = _declared_minimum()
+        report = json.dumps(
+            {"ok": True, "engine": {"name": "forgel", "version": version}}
+        )
+        asked = os.path.join(self.tmp, "engine-asked.log")
+        binary = Path(self.env["FORGEL_ENGINE"])
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text(
+            "#!/bin/sh\n"
+            "echo \"$*\" >>%s\n"
+            "if [ \"$1\" = version ]; then\n"
+            "    echo %s\n"
+            "    exit 0\n"
+            "fi\n"
+            "exit 1\n" % (shlex.quote(asked), shlex.quote(report)),
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        self.offer(version)
+
+        result = self.install()
+
+        self.assertEqual(result.returncode, 0, self.report(result))
+        with open(asked, encoding="utf-8") as handle:
+            self.assertEqual(
+                [line.strip() for line in handle if line.strip()],
+                ["version --json"],
+            )
+        self.assertEqual(self.install_calls(), [])
+        self.assertIn("Engine: forgel %s kept" % version, result.stdout)
 
 
 class EngineReplacedTest(EngineCase):

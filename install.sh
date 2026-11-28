@@ -1048,24 +1048,25 @@ engine_binary() {
     return 1
 }
 
-# The version the engine in place reports, or nothing when no engine is present
-# or its report cannot be read. An engine that cannot report a version is
-# treated exactly like a missing one.
+# The version the engine in place reports, or nothing when no engine can be
+# asked. The engine is asked the way the client itself asks it, and the answer is
+# read with the client's own reader of that report, so the installation and the
+# client never disagree about which answer carries the version.
 engine_present_version() {
     binary=$(engine_binary) || return 1
-    report=$("$binary" --version --json 2>/dev/null) || return 1
-    "$PYTHON" -c '
-import json, sys
+    PYTHONPATH="$PREFIX" "$PYTHON" -c '
+import sys
+from forgel_code.compat import reported_version
+from forgel_code.engine import Engine, EngineError
 try:
-    payload = json.loads(sys.argv[1])
-except ValueError:
+    payload = Engine(sys.argv[1]).run(("version",))
+except EngineError:
     sys.exit(1)
-engine = payload.get("engine") if isinstance(payload, dict) else None
-version = engine.get("version") if isinstance(engine, dict) else None
-if not isinstance(version, str) or not version.strip():
+version = reported_version(payload)
+if version is None:
     sys.exit(1)
-print(version.strip())
-' "$report" 2>/dev/null
+print(version)
+' "$binary" 2>/dev/null
 }
 
 # The version the configured engine source provides, as the engine's own

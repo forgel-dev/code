@@ -15,8 +15,10 @@ Contract:
   forgel-install --source SOURCE --install VERSION
       Installs VERSION and exits 0, or prints why on stderr and exits non-zero.
 
-The engine binary the installer writes answers the engine's own report,
-``forgel --version --json``, with one JSON object on stdout.
+The engine binary the installer writes answers the engine's own version report,
+``forgel version --json``, with one JSON object on stdout that carries the
+version it runs; every other argument gets the engine's structured
+unsupported-command answer and a non-zero exit.
 
 State, so a scenario can force any case:
 
@@ -34,10 +36,18 @@ import json
 import os
 import sys
 
-# The engine's own version report: one JSON object on stdout.
+# The engine's own version report, as the recorded engine contract serves it:
+# `forgel version --json` prints one JSON object that carries the version the
+# engine runs. Any other argv gets the engine's structured unsupported-command
+# answer, so a reader that asks in an undocumented form cannot look healthy.
 ENGINE_BINARY = """#!/bin/sh
-# Forgel engine written by the stub installer; answers --version --json.
-printf '%s\\n' '{report}'
+# Forgel engine written by the stub installer; answers `forgel version --json`.
+if [ "$1" = "version" ]; then
+    printf '%s\\n' '{report}'
+    exit 0
+fi
+printf '%s\\n' '{unsupported}'
+exit 2
 """
 
 
@@ -69,11 +79,25 @@ def write_engine(version: str) -> int:
         {"ok": True, "engine": {"name": "forgel", "version": version}},
         sort_keys=True,
     )
+    unsupported = json.dumps(
+        {
+            "ok": False,
+            "error": {
+                "code": "unsupported_command",
+                "message": "unsupported command: " + "$1",
+            },
+            "description": "unsupported command: " + "$1",
+        },
+        sort_keys=True,
+    )
+    body = ENGINE_BINARY.replace("{report}", report).replace(
+        "{unsupported}", unsupported
+    )
     directory = os.path.dirname(target)
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(target, "w", encoding="utf-8") as handle:
-        handle.write(ENGINE_BINARY.replace("{report}", report))
+        handle.write(body)
     os.chmod(target, 0o755)
     return 0
 
